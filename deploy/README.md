@@ -5,7 +5,14 @@ The `Dockerfile` at the repo root packages stages 1–5 of ApplyPilot (discover 
 - runs `applypilot run` when it starts, then every `RUN_INTERVAL_HOURS`
 - serves the results dashboard, tailored resumes and cover letters over HTTP, behind basic auth
 
-Stage 6 (auto-apply) isn't included. It needs the Claude Code CLI driving a real Chrome session, and job sites block headless cloud browsers. Run `applypilot apply` on your own machine using the materials this server produces.
+Stage 6 (auto-apply) doesn't run on the server: it needs the Claude Code CLI driving a real Chrome session, and job sites block cloud browsers. Instead, the **companion** (`deploy/companion.py`, downloadable from the site's Auto-apply page with the server address filled in) runs it on your own PC:
+
+1. installs the exact ApplyPilot version the server runs (`/api/package.tar.gz`),
+2. downloads the jobs left to apply to, with their resumes and cover letters (`/api/bundle.zip`; duplicates of applied jobs are left out),
+3. runs a practice pass (fills in, never submits) or real applications through `applypilot.apply.launcher`,
+4. posts real outcomes to `/api/results`, which marks submitted jobs Applied and notes failures (CAPTCHA, login) on the job card.
+
+Practice runs are never reported. Jobs can also be marked applied by hand on the Ready to apply page.
 
 ## Railway
 
@@ -40,6 +47,8 @@ The server rewrites the profile, resume and searches files from these variables 
 - `/` — the dashboard (redirects to `/setup` until configured)
 - `/setup` — the setup form
 - `/status` — run state, config problems, and a "Run pipeline now" button
+- `/ready` — jobs with tailored documents: download, edit (`/edit`), Word export (`/docx`), mark applied (`/mark`)
+- `/autoapply`, `/companion.py`, `/api/*` — the auto-apply companion and its endpoints
 - `/files/tailored_resumes/`, `/files/cover_letters/` — generated documents
 - `/health` — the unauthenticated healthcheck
 

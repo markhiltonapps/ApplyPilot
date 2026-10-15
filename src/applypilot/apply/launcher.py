@@ -11,6 +11,7 @@ import logging
 import os
 import platform
 import re
+import shutil
 import signal
 import subprocess
 import sys
@@ -63,22 +64,23 @@ if platform.system() != "Windows":
 # MCP config
 # ---------------------------------------------------------------------------
 
+def _npx(args: list[str]) -> dict:
+    """An MCP server entry that runs npx; Windows needs it wrapped in cmd /c (npx is a .cmd script)."""
+    if platform.system() == "Windows":
+        return {"command": "cmd", "args": ["/c", "npx", *args]}
+    return {"command": "npx", "args": args}
+
+
 def _make_mcp_config(cdp_port: int) -> dict:
     """Build MCP config dict for a specific CDP port."""
     return {
         "mcpServers": {
-            "playwright": {
-                "command": "npx",
-                "args": [
-                    "@playwright/mcp@latest",
-                    f"--cdp-endpoint=http://localhost:{cdp_port}",
-                    f"--viewport-size={config.DEFAULTS['viewport']}",
-                ],
-            },
-            "gmail": {
-                "command": "npx",
-                "args": ["-y", "@gongrzhe/server-gmail-autoauth-mcp"],
-            },
+            "playwright": _npx([
+                "@playwright/mcp@latest",
+                f"--cdp-endpoint=http://localhost:{cdp_port}",
+                f"--viewport-size={config.DEFAULTS['viewport']}",
+            ]),
+            "gmail": _npx(["-y", "@gongrzhe/server-gmail-autoauth-mcp"]),
         }
     }
 
@@ -323,7 +325,8 @@ def run_job(job: dict, port: int, worker_id: int = 0,
 
     # Build claude command
     cmd = [
-        "claude",
+        # Full path: on Windows `claude` may be claude.cmd, which Popen can't start by bare name.
+        shutil.which("claude") or "claude",
         "--model", model,
         "-p",
         "--mcp-config", str(mcp_config_path),

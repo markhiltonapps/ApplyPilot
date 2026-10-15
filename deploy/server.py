@@ -459,6 +459,11 @@ def _job_card(j, applied_keys: set[str]) -> str:
               f'<a class="btn primary sm" href="/edit?f={resume_rel}">Fix it in the editor</a></details>'
               if note else "")
     dup = ""
+    status = j["apply_status"] or ""
+    if not applied and status and status not in ("applied", "applied_auto", "in_progress"):
+        reason = (j["apply_error"] or status).replace("_", " ")
+        dup = (f'<div class="muted small">Auto-apply couldn&rsquo;t finish this one ({html.escape(reason[:120])}). '
+               f'Apply by hand.</div>')
     if not applied and _dup_key(j["title"], j["site"]) in applied_keys:
         dup = ('<div class="review" style="margin:0"><b style="color:var(--warn)">You already applied to a job '
                'with this title here.</b> It\'s probably the same posting listed twice.</div>')
@@ -495,7 +500,7 @@ def ready_html() -> bytes:
             conn.row_factory = sqlite3.Row
             jobs = conn.execute(
                 "SELECT title, site, location, url, application_url, fit_score, tailored_resume_path, "
-                "cover_letter_path, applied_at, apply_status FROM jobs WHERE tailored_resume_path IS NOT NULL "
+                "cover_letter_path, applied_at, apply_status, apply_error FROM jobs WHERE tailored_resume_path IS NOT NULL "
                 "ORDER BY fit_score DESC, tailored_at DESC").fetchall()
             conn.close()
         except sqlite3.Error as e:
@@ -528,6 +533,100 @@ apply, then tick <b>I applied</b> so you never apply twice.</p>
     return page("Ready to apply", body, "ready")
 
 
+APP_ROOT = Path(__file__).resolve().parent.parent  # the ApplyPilot source the server runs
+_package_cache: bytes | None = None
+
+
+def package_tarball() -> bytes:
+    """This server's ApplyPilot source as a pip-installable sdist-style tar.gz (for the companion)."""
+    global _package_cache
+    if _package_cache is None:
+        import io
+        import tarfile
+        buf = io.BytesIO()
+        with tarfile.open(fileobj=buf, mode="w:gz") as tar:
+            for name in ("pyproject.toml", "README.md", "LICENSE"):
+                tar.add(APP_ROOT / name, arcname=f"applypilot/{name}")
+            tar.add(APP_ROOT / "src", arcname="applypilot/src",
+                    filter=lambda t: None if "__pycache__" in t.name else t)
+        _package_cache = buf.getvalue()
+    return _package_cache
+
+
+def apply_bundle() -> bytes:
+    """Everything the companion needs to auto-apply: profile, jobs left to apply to, and their documents."""
+    import io
+    import sqlite3
+    import zipfile
+    conn = sqlite3.connect(f"file:{DATA_DIR / 'applypilot.db'}?mode=ro", uri=True, timeout=10)
+    conn.row_factory = sqlite3.Row
+    rows = conn.execute(
+        "SELECT url, title, site, location, application_url, fit_score, full_description, "
+        "tailored_resume_path, cover_letter_path, COALESCE(apply_attempts, 0) AS apply_attempts "
+        "FROM jobs WHERE tailored_resume_path IS NOT NULL AND applied_at IS NULL "
+        "AND COALESCE(apply_status, '') NOT IN ('manual', 'expired') "
+        "ORDER BY fit_score DESC").fetchall()
+    # Never queue the same posting twice: skip duplicates of anything applied to, and of each other.
+    seen = {_dup_key(t, st) for t, st in conn.execute(
+        "SELECT title, site FROM jobs WHERE applied_at IS NOT NULL").fetchall()}
+    unique = []
+    for r in rows:
+        key = _dup_key(r["title"], r["site"])
+        if key not in seen:
+            seen.add(key)
+            unique.append(r)
+    rows = unique
+    conn.close()
+    buf = io.BytesIO()
+    jobs = []
+    written: set[str] = set()
+    with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as z:
+        z.write(DATA_DIR / "profile.json", "profile.json")
+        if (DATA_DIR / "resume.txt").exists():
+            z.write(DATA_DIR / "resume.txt", "resume.txt")
+        for r in rows:
+            job = {k: r[k] for k in ("url", "title", "site", "location", "application_url", "fit_score",
+                                     "full_description", "apply_attempts")}
+            for key, col in (("tailored_resume", "tailored_resume_path"), ("cover_letter", "cover_letter_path")):
+                rel = _rel(r[col])
+                job[key] = rel or None
+                if rel:
+                    for suffix in (".txt", ".pdf"):
+                        f = (DATA_DIR / rel).with_suffix(suffix)
+                        name = f.relative_to(DATA_DIR).as_posix()
+                        if f.exists() and name not in written:
+                            z.write(f, name)
+                            written.add(name)
+            jobs.append(job)
+        z.writestr("manifest.json", json.dumps({
+            "jobs": jobs, "min_score": int(setup_form.saved_min_score(DATA_DIR)), "created": now_iso()}))
+    return buf.getvalue()
+
+
+def record_results(results: list[dict]) -> int:
+    """Apply the companion's outcomes: real submissions become applied; failures are noted."""
+    import sqlite3
+    updated = 0
+    for r in results:
+        url, status = r.get("url"), (r.get("status") or "").strip()
+        if not url or not status:
+            continue
+        if status == "applied":
+            updated += mark_applied(url, True, "applied_auto", r.get("at"))
+            continue
+        try:
+            conn = sqlite3.connect(DATA_DIR / "applypilot.db", timeout=10)
+            updated += conn.execute(
+                "UPDATE jobs SET apply_status = ?, apply_error = ?, "
+                "apply_attempts = COALESCE(apply_attempts, 0) + 1 WHERE url = ? AND applied_at IS NULL",
+                (status, (r.get("error") or "")[:300], url)).rowcount
+            conn.commit()
+            conn.close()
+        except sqlite3.Error as e:
+            log(f"Could not record result for {url}: {e}")
+    return updated
+
+
 def mark_applied(url: str, applied: bool, status: str = "applied", when: str | None = None) -> bool:
     """Record (or undo) an application for a job. Returns whether a job was updated."""
     import sqlite3
@@ -545,6 +644,41 @@ def mark_applied(url: str, applied: bool, status: str = "applied", when: str | N
     except sqlite3.Error as e:
         log(f"Could not update applied state: {e}")
         return False
+
+
+def autoapply_html(host: str) -> bytes:
+    c = job_counts() or {}
+    body = f"""<h1>Auto-apply</h1>
+<p class="sub">Let Claude fill in and submit applications for you, from your own Windows PC.</p>
+<div class="card stack">
+<p style="margin:0">The companion downloads your <b>Ready to apply</b> jobs and their resumes, then uses Claude Code
+and Chrome on your PC to fill in each application. Jobs it submits are marked <b>Applied</b> here automatically,
+so nothing is sent twice.</p>
+<a class="btn primary" href="/companion.py" download="ApplyPilot-Companion.py">Download the companion</a>
+</div>
+<details class="card" open><summary><b>One-time setup (Windows)</b></summary>
+<ol class="steps" style="margin-top:16px">
+<li><b>Download the companion</b> <span class="muted">with the button above. It saves as
+<code>ApplyPilot-Companion.py</code> in your Downloads folder.</span></li>
+<li><b>Open PowerShell</b> <span class="muted">(Start menu, type PowerShell) and run:<br>
+<code>cd ~\\Downloads</code><br><code>python ApplyPilot-Companion.py</code></span></li>
+<li><b>Enter your site password</b> <span class="muted">when asked. It's remembered after the first time. The
+first run also installs ApplyPilot, which takes a few minutes.</span></li>
+<li><b>Start with a practice run.</b> <span class="muted">Chrome opens and Claude fills in your best match but
+<b>doesn't submit</b>. Watch it and check the answers.</span></li>
+<li><b>Then let it apply.</b> <span class="muted">Choose how many jobs. Each takes a few minutes; keep the PC awake
+and don't use that Chrome window while it works.</span></li>
+</ol></details>
+<details class="card"><summary><b>Good to know</b></summary>
+<ul class="muted small" style="margin:12px 0 0;padding-left:20px">
+<li>It submits under your name using your Setup details (salary, start date, work authorization), so keep them
+current.</li>
+<li>Sites that need an account login or a CAPTCHA often can't be finished; those are noted on the job card for
+you to apply by hand.</li>
+<li>It uses your Claude subscription through Claude Code; each application is several minutes of Claude's work.</li>
+<li>Run the companion again any time to pick up new matches. {c.get('tailored', 0)} jobs have resumes ready now.</li>
+</ul></details>"""
+    return page("Auto-apply", body, "auto")
 
 
 def listing_html(rel: str, directory: Path) -> bytes:
@@ -602,6 +736,18 @@ class Handler(BaseHTTPRequestHandler):
         if not self._authorized():
             return
 
+        if path == "/autoapply":
+            return self._send(200, autoapply_html(self.headers.get("Host", "")))
+        if path == "/companion.py":
+            host = self.headers.get("Host", "")
+            script = (Path(__file__).parent / "companion.py").read_text(encoding="utf-8")
+            script = script.replace("__SERVER_URL__", f"https://{host}")
+            return self._send(200, script.encode(), "text/x-python; charset=utf-8",
+                              {"Content-Disposition": 'attachment; filename="ApplyPilot-Companion.py"'})
+        if path == "/api/package.tar.gz":
+            return self._send(200, package_tarball(), "application/gzip")
+        if path == "/api/bundle.zip":
+            return self._send(200, apply_bundle(), "application/zip")
         if path in ("/edit", "/docx"):
             rel = parse_qs(urlparse(self.path).query).get("f", [""])[0]
             doc = editor.resolve(DATA_DIR, rel)
@@ -658,7 +804,7 @@ class Handler(BaseHTTPRequestHandler):
 
     def do_POST(self):
         path = urlparse(self.path).path
-        if path not in ("/run", "/setup", "/edit", "/mark"):
+        if path not in ("/run", "/setup", "/edit", "/mark", "/api/results"):
             return self._send(404, b"Not found", "text/plain")
         if not self._authorized():
             return
@@ -666,6 +812,15 @@ class Handler(BaseHTTPRequestHandler):
             return self._post_setup()
         if path == "/edit":
             return self._post_edit()
+        if path == "/api/results":
+            length = int(self.headers.get("Content-Length") or 0)
+            try:
+                results = json.loads(self.rfile.read(min(length, 2 * 1024 * 1024))).get("results", [])
+            except ValueError:
+                return self._send(400, b'{"error": "bad json"}', "application/json")
+            n = record_results(results if isinstance(results, list) else [])
+            log(f"Companion reported {len(results)} result(s), {n} recorded")
+            return self._send(200, json.dumps({"updated": n}).encode(), "application/json")
         if path == "/mark":
             length = int(self.headers.get("Content-Length") or 0)
             form = parse_qs(self.rfile.read(min(length, 65536)).decode("utf-8", errors="replace"))
