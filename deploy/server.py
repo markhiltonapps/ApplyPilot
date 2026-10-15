@@ -36,6 +36,8 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import unquote, urlparse
 
+import setup_form
+
 DATA_DIR = Path(os.environ.setdefault("APPLYPILOT_DIR", "/data"))
 PORT = int(os.environ.get("PORT", "8080"))
 PASSWORD = os.environ.get("DASHBOARD_PASSWORD", "")
@@ -101,12 +103,12 @@ def seed_config() -> list[str]:
         except yaml.YAMLError as e:
             problems.append(f"APPLYPILOT_SEARCHES_YAML is not valid YAML: {e}")
 
-    if not (DATA_DIR / "profile.json").exists():
-        problems.append("profile.json missing: set APPLYPILOT_PROFILE_JSON")
     if not (DATA_DIR / "resume.txt").exists():
-        problems.append("resume.txt missing: set APPLYPILOT_RESUME_TXT")
-    if not any(os.environ.get(k) for k in ("GEMINI_API_KEY", "OPENAI_API_KEY", "LLM_URL")):
-        problems.append("No LLM configured: set GEMINI_API_KEY (or OPENAI_API_KEY / LLM_URL)")
+        problems.append("Resume not added yet (use the setup page)")
+    if not (DATA_DIR / "profile.json").exists():
+        problems.append("Profile not filled in yet (use the setup page)")
+    if not setup_form.has_llm_key(DATA_DIR, os.environ):
+        problems.append("Gemini API key not added yet (use the setup page)")
     return problems
 
 
@@ -134,7 +136,7 @@ def run_pipeline() -> None:
                 log(f"Not running pipeline: {p}")
             return
 
-        cmd = ["applypilot", "run", *RUN_ARGS]
+        cmd = [sys.executable, "-m", "applypilot", "run", *RUN_ARGS]
         log(f"Starting pipeline: {shlex.join(cmd)}")
         with _state_lock:
             state["running"] = True
@@ -178,9 +180,13 @@ def scheduler() -> None:
 def page(title: str, body: str) -> bytes:
     return f"""<!doctype html><html><head><meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1"><title>{html.escape(title)}</title>
-<style>body{{font-family:system-ui,sans-serif;max-width:860px;margin:2rem auto;padding:0 16px;
-background:#0f1115;color:#e6e6e6}}a{{color:#7cb7ff}}code,pre{{background:#1b1f27;padding:2px 6px;
-border-radius:4px}}pre{{padding:12px;overflow:auto}}button{{padding:8px 14px}}</style></head>
+<style>:root{{--line:#343a46;--field:#1b1f27;--muted:#9aa3b2}}
+body{{font-family:system-ui,sans-serif;max-width:720px;margin:1.5rem auto;padding:0 16px;
+background:#0f1115;color:#e6e6e6;line-height:1.45}}a{{color:#7cb7ff}}code,pre{{background:#1b1f27;
+padding:2px 6px;border-radius:4px}}pre{{padding:12px;white-space:pre-wrap;word-break:break-word}}
+button{{padding:8px 14px}}.big{{display:block;text-align:center;padding:14px;border-radius:10px;
+background:#2f6fed;color:#fff;font-weight:600;text-decoration:none;margin:12px 0}}
+{setup_form.FORM_CSS}</style></head>
 <body>{body}</body></html>""".encode()
 
 
@@ -189,10 +195,12 @@ def status_html() -> bytes:
         s = dict(state)
     problems = "".join(f"<li>{html.escape(p)}</li>" for p in s["config_problems"])
     links = " · ".join(f'<a href="/files/{d}/">{d}</a>' for d in SERVED_DIRS)
+    setup = ('<h3>Setup needed</h3><ul>' + problems + '</ul><a class="big" href="/setup">Open setup page</a>'
+             if problems else '<p><a href="/setup">Edit setup</a></p>')
     body = f"""<h1>ApplyPilot</h1>
 <p><a href="/">Dashboard</a> · {links}</p>
+{setup}
 <pre>{html.escape(json.dumps(s, indent=2))}</pre>
-{"<h3>Configuration problems</h3><ul>" + problems + "</ul>" if problems else ""}
 <form method="post" action="/run"><button>Run pipeline now</button></form>"""
     return page("ApplyPilot status", body)
 
@@ -247,7 +255,11 @@ class Handler(BaseHTTPRequestHandler):
         if not self._authorized():
             return
 
+        if path == "/setup":
+            return self._send(200, page("ApplyPilot setup", setup_form.render(DATA_DIR, os.environ)))
         if path == "/":
+            if seed_config():
+                return self._send(303, b"", "text/plain", {"Location": "/setup"})
             dash = DATA_DIR / "dashboard.html"
             if dash.exists():
                 return self._send(200, dash.read_bytes())
@@ -274,16 +286,36 @@ class Handler(BaseHTTPRequestHandler):
         self._send(404, b"Not found", "text/plain")
 
     def do_POST(self):
-        if urlparse(self.path).path != "/run":
+        path = urlparse(self.path).path
+        if path not in ("/run", "/setup"):
             return self._send(404, b"Not found", "text/plain")
         if not self._authorized():
             return
+        if path == "/setup":
+            return self._post_setup()
         if _run_lock.locked():
             msg = "Pipeline is already running."
         else:
             threading.Thread(target=run_pipeline, daemon=True).start()
             msg = "Pipeline started."
         self._send(303, msg.encode(), "text/plain", {"Location": "/status"})
+
+    def _post_setup(self):
+        length = int(self.headers.get("Content-Length") or 0)
+        if length > setup_form.MAX_UPLOAD_BYTES + 1024 * 1024:
+            return self._send(413, page("Too large", "<p>That upload is too large (10 MB max).</p>"))
+        body = self.rfile.read(length)
+        fields, files = setup_form.parse_multipart(self.headers.get("Content-Type", ""), body)
+        errors = setup_form.save(DATA_DIR, fields, files, os.environ)
+        if errors:
+            return self._send(200, page("ApplyPilot setup",
+                                        setup_form.render(DATA_DIR, os.environ, fields, errors)))
+        log("Setup saved from the web form")
+        with _state_lock:
+            state["config_problems"] = seed_config()
+        if not _run_lock.locked():
+            threading.Thread(target=run_pipeline, daemon=True).start()
+        self._send(200, page("ApplyPilot setup", setup_form.render(DATA_DIR, os.environ, saved=True)))
 
 
 def main() -> None:
