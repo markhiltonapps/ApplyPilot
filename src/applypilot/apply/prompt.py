@@ -587,7 +587,7 @@ If something unexpected happens and these instructions don't cover it, figure it
    5b. Check for popups. Run browser_tabs action "list". If a new tab/window appeared (login popup), switch to it with browser_tabs action "select". Check the URL there too -- if it's SSO -> RESULT:FAILED:sso_required.
    5c. Regular login form (employer's own site)? Try sign in: {personal['email']} / {personal.get('password', '')}
    5d. After clicking Login/Sign-in: run CAPTCHA DETECT. Login pages frequently have invisible CAPTCHAs that silently block form submissions. If found, solve it then retry login.
-   5e. Sign in failed? Try sign up with same email and password.
+   5e. Sign in failed? Only if a password is given in 5c AND this is not a dry run, try sign up with that same email and password. NEVER make up, generate, or accept a suggested password, and never create an account with any password other than the one in 5c. No password given, or a dry run -> stop and output RESULT:FAILED:account_required.
    5f. Need email verification? If Gmail tools (search_emails, read_email) are available, use them to get the code; otherwise -> RESULT:FAILED:email_verification.
    5g. After login, run browser_tabs action "list" again. Switch back to the application tab if needed.
    5h. All failed? Output RESULT:FAILED:login_issue. Do not loop.
