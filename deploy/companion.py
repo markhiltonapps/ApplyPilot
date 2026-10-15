@@ -29,7 +29,7 @@ import urllib.request
 import zipfile
 from pathlib import Path
 
-VERSION = "5"
+VERSION = "6"
 SERVER = "__SERVER_URL__"  # filled in by the server when you download this file
 USER = "applypilot"
 MODEL = os.environ.get("APPLYPILOT_MODEL", "sonnet")  # Claude model used to fill in forms
@@ -116,6 +116,26 @@ def ensure_installed(cfg: dict, password: str) -> None:
         sys.exit("Installing ApplyPilot failed. See the messages above.")
     cfg["package_sha"] = digest
     save_config(cfg)
+
+
+def ensure_browser_tool() -> None:
+    """Install Claude's browser tool once, so each job starts in seconds instead of fetching it via npx."""
+    from applypilot.apply.launcher import PLAYWRIGHT_MCP_VERSION as version
+    prefix = HOME / "node"
+    pkg = prefix / "node_modules" / "@playwright" / "mcp"
+    try:
+        current = json.loads((pkg / "package.json").read_text(encoding="utf-8")).get("version")
+    except (OSError, ValueError):
+        current = None
+    if current != version:
+        say("Installing the browser tool (one time)...")
+        npm = ["cmd", "/c", "npm"] if os.name == "nt" else ["npm"]
+        result = subprocess.run([*npm, "install", "--prefix", str(prefix), "--no-audit", "--no-fund",
+                                 f"@playwright/mcp@{version}"], check=False)
+        if result.returncode != 0:
+            say("Couldn't install it; jobs will fetch it each time instead (slower, but works).")
+            return
+    os.environ["APPLYPILOT_PLAYWRIGHT_MCP"] = str(pkg / "cli.js")
 
 
 def self_update(password: str) -> None:
@@ -293,6 +313,7 @@ def main() -> None:
     self_update(password)
     ensure_installed(cfg, password)
     check_tools()
+    ensure_browser_tool()
 
     manifest = download_jobs(password)
     min_score = int(manifest.get("min_score") or 6)

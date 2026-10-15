@@ -590,7 +590,7 @@ ACCOUNT_SITES = ("myworkdayjobs.com", "workday.com", "oraclecloud.com", "taleo.n
 # Auto-apply outcomes that won't change on a retry, so the job is left for the person to do by hand.
 HAND_ONLY_REASONS = ("login_issue", "account_required", "sso_required", "expired", "already_applied",
                      "not_a_job_application", "not_eligible_location", "not_eligible_salary",
-                     "not_eligible_work_auth", "captcha")
+                     "not_eligible_work_auth", "captcha", "email_verification")
 FAILURE_WORDS = {
     "login_issue": "the site needs an account",
     "account_required": "the site needs an account",
@@ -601,6 +601,7 @@ FAILURE_WORDS = {
     "not_eligible_location": "the role isn't open to your location",
     "not_eligible_work_auth": "the role's work authorization doesn't fit",
     "not_eligible_salary": "the salary range doesn't fit",
+    "email_verification": "the site emails you a code to finish",
 }
 
 

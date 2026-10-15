@@ -71,18 +71,23 @@ def _npx(args: list[str]) -> dict:
     return {"command": "npx", "args": args}
 
 
+# Pinned so npx doesn't check the registry (and maybe re-download) on every job.
+PLAYWRIGHT_MCP_VERSION = "0.0.83"
+
+
 def _make_mcp_config(cdp_port: int) -> dict:
     """Build MCP config dict for a specific CDP port."""
-    return {
-        "mcpServers": {
-            "playwright": _npx([
-                "@playwright/mcp@latest",
-                f"--cdp-endpoint=http://localhost:{cdp_port}",
-                f"--viewport-size={config.DEFAULTS['viewport']}",
-            ]),
-            "gmail": _npx(["-y", "@gongrzhe/server-gmail-autoauth-mcp"]),
-        }
-    }
+    args = [f"--cdp-endpoint=http://localhost:{cdp_port}", f"--viewport-size={config.DEFAULTS['viewport']}"]
+    # A preinstalled copy (the companion sets this) starts in a second instead of going through npx.
+    cli = os.environ.get("APPLYPILOT_PLAYWRIGHT_MCP")
+    if cli and Path(cli).exists():
+        servers = {"playwright": {"command": shutil.which("node") or "node", "args": [cli, *args]}}
+    else:
+        servers = {"playwright": _npx(["-y", f"@playwright/mcp@{PLAYWRIGHT_MCP_VERSION}", *args])}
+    # The Gmail server only works once it has been authorized; otherwise it just slows startup.
+    if (Path.home() / ".gmail-mcp" / "credentials.json").exists():
+        servers["gmail"] = _npx(["-y", "@gongrzhe/server-gmail-autoauth-mcp"])
+    return {"mcpServers": servers}
 
 
 # ---------------------------------------------------------------------------
