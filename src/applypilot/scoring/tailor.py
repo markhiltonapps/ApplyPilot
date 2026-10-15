@@ -400,12 +400,15 @@ def tailor_resume(
             {"role": "user", "content": f"ORIGINAL RESUME:\n{resume_text}\n\n---\n\nTARGET JOB:\n{job_text}\n\nReturn the JSON:"},
         ]
 
-        raw = client.chat(messages, max_tokens=2048, temperature=0.4)
+        # A long master resume tailors into a long JSON answer; 2048 tokens cut it off mid-object.
+        raw = client.chat(messages, max_tokens=8192, temperature=0.4)
 
         # Parse JSON from response
         try:
             data = extract_json(raw)
         except ValueError:
+            log.warning("Tailor attempt %d: reply was not valid JSON (%d chars, ends %r)",
+                        attempt + 1, len(raw), raw[-60:])
             avoid_notes.append("Output was not valid JSON. Return ONLY a JSON object, nothing else.")
             continue
 
