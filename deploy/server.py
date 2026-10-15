@@ -171,7 +171,10 @@ def run_pipeline(wait: bool = False) -> None:
             return
 
         requeue_failed_scores()
-        cmd = [sys.executable, "-m", "applypilot", "run", *RUN_ARGS]
+        args = list(RUN_ARGS)
+        if "--min-score" not in args:
+            args += ["--min-score", setup_form.saved_min_score(DATA_DIR)]
+        cmd = [sys.executable, "-m", "applypilot", "run", *args]
         log(f"Starting pipeline: {shlex.join(cmd)}")
         with _state_lock:
             state["running"] = True

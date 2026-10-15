@@ -300,6 +300,12 @@ def save(data_dir: Path, fields: dict[str, str], files: dict[str, tuple[str, byt
     return []
 
 
+def saved_min_score(data_dir: Path) -> str:
+    """Lowest fit score that gets a tailored resume, as chosen on the setup page (default 6)."""
+    value = _saved_form(data_dir).get("min_score", "6")
+    return value if value in ("5", "6", "7", "8") else "6"
+
+
 def rebuild_from_saved(data_dir: Path) -> bool:
     """Regenerate profile.json and searches.yaml from the saved form, if there is one.
 
@@ -388,7 +394,7 @@ def write_config(data_dir: Path, f: dict[str, str]) -> None:
         "location_reject_non_remote": [],
         "defaults": {
             "results_per_site": 50,
-            "hours_old": 72,
+            "hours_old": 24 * int(f.get("days_back") or 7),
             "country_indeed": INDEED_COUNTRIES.get(f["country"].lower(), f["country"].lower()),
         },
         "exclude_titles": EXCLUDE_TITLES,
@@ -539,6 +545,11 @@ document.querySelectorAll('.pk').forEach(function(d){{d.style.display=d.dataset.
        placeholder="AI Solutions Architect")}
 {check("want_remote", "Remote jobs", True)}
 {check("want_local", "Jobs near my city", True)}
+<div class="row"><div>{select("days_back", "Look at jobs posted in the last",
+    [("3", "3 days"), ("7", "week"), ("14", "2 weeks")], "7")}</div>
+<div>{select("min_score", "Write resumes for jobs scoring",
+    [("5", "5 or more (most)"), ("6", "6 or more"), ("7", "7 or more"), ("8", "8 or more (fewest)")], "6")}</div></div>
+<p class="hint">Jobs are scored 1&ndash;10 for how well they fit you. A lower bar gives you more resumes to review.</p>
 <div class="row"><div>{text("salary_min", "Salary minimum", hint="Yearly, numbers only")}</div>
 <div>{text("salary_max", "Salary maximum")}</div></div>
 {text("currency", "Currency", default="USD")}
