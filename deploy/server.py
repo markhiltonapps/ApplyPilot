@@ -185,24 +185,102 @@ def page(title: str, body: str) -> bytes:
 body{{font-family:system-ui,sans-serif;max-width:720px;margin:1.5rem auto;padding:0 16px;
 background:#0f1115;color:#e6e6e6;line-height:1.45}}a{{color:#7cb7ff}}code,pre{{background:#1b1f27;
 padding:2px 6px;border-radius:4px}}pre{{padding:12px;white-space:pre-wrap;word-break:break-word}}
-button{{padding:8px 14px}}.big{{display:block;text-align:center;padding:14px;border-radius:10px;
+button{{padding:8px 14px}}table.counts{{width:100%;border-collapse:collapse;margin:12px 0}}
+table.counts td{{padding:8px 4px;border-bottom:1px solid var(--line)}}table.counts td:last-child{{text-align:right}}
+.hint{{color:var(--muted)}}.big{{display:block;text-align:center;padding:14px;border-radius:10px;
 background:#2f6fed;color:#fff;font-weight:600;text-decoration:none;margin:12px 0}}
 {setup_form.FORM_CSS}</style></head>
 <body>{body}</body></html>""".encode()
 
 
+def job_counts() -> dict[str, int] | None:
+    """Counts of jobs at each pipeline stage, read straight from the job database."""
+    import sqlite3
+    db = DATA_DIR / "applypilot.db"
+    if not db.exists():
+        return None
+    queries = {
+        "found": "SELECT COUNT(*) FROM jobs",
+        "described": "SELECT COUNT(*) FROM jobs WHERE full_description IS NOT NULL",
+        "scored": "SELECT COUNT(*) FROM jobs WHERE fit_score IS NOT NULL",
+        "good_fit": "SELECT COUNT(*) FROM jobs WHERE fit_score >= 7",
+        "tailored": "SELECT COUNT(*) FROM jobs WHERE tailored_resume_path IS NOT NULL",
+        "covers": "SELECT COUNT(*) FROM jobs WHERE cover_letter_path IS NOT NULL",
+    }
+    try:
+        conn = sqlite3.connect(f"file:{db}?mode=ro", uri=True, timeout=5)
+        try:
+            return {k: conn.execute(q).fetchone()[0] for k, q in queries.items()}
+        finally:
+            conn.close()
+    except sqlite3.Error:
+        return None
+
+
+def _ago(iso: str | None) -> str:
+    if not iso:
+        return ""
+    mins = int((datetime.now(UTC) - datetime.fromisoformat(iso)).total_seconds() // 60)
+    if mins < 1:
+        return "just now"
+    if mins < 60:
+        return f"{mins} min ago"
+    return f"{mins // 60} h {mins % 60} min ago"
+
+
+def _until(iso: str | None) -> str:
+    if not iso:
+        return ""
+    mins = int((datetime.fromisoformat(iso) - datetime.now(UTC)).total_seconds() // 60)
+    return f"in about {mins // 60} h {mins % 60} min" if mins >= 60 else f"in about {max(mins, 1)} min"
+
+
 def status_html() -> bytes:
     with _state_lock:
         s = dict(state)
-    problems = "".join(f"<li>{html.escape(p)}</li>" for p in s["config_problems"])
-    links = " · ".join(f'<a href="/files/{d}/">{d}</a>' for d in SERVED_DIRS)
-    setup = ('<h3>Setup needed</h3><ul>' + problems + '</ul><a class="big" href="/setup">Open setup page</a>'
-             if problems else '<p><a href="/setup">Edit setup</a></p>')
+    if s["config_problems"]:
+        problems = "".join(f"<li>{html.escape(p)}</li>" for p in s["config_problems"])
+        return page("ApplyPilot status", f"""<h1>ApplyPilot</h1><h3>Setup needed</h3><ul>{problems}</ul>
+<a class="big" href="/setup">Open setup page</a>""")
+
+    if s["running"]:
+        headline = f"🔄 Searching for jobs. Started {_ago(s['last_started'])}."
+        detail = ("A full run usually takes 30–90 minutes. This page doesn't update by itself: "
+                  "refresh it to see the numbers go up.")
+    elif s["last_finished"]:
+        ok = s["last_exit_code"] == 0
+        headline = (f"✅ Last search finished {_ago(s['last_finished'])}." if ok else
+                    f"⚠️ Last search finished {_ago(s['last_finished'])} with some errors.")
+        detail = f"Next automatic search {_until(s['next_run'])}." if s["next_run"] else ""
+    else:
+        headline = "Waiting to start."
+        detail = f"Next automatic search {_until(s['next_run'])}." if s["next_run"] else ""
+
+    c = job_counts()
+    rows = ""
+    if c:
+        steps = [
+            ("Jobs found", c["found"]),
+            ("Full job descriptions fetched", c["described"]),
+            ("Jobs scored against your resume", c["scored"]),
+            ("Good fits (7+ out of 10)", c["good_fit"]),
+            ("Tailored resumes written", c["tailored"]),
+            ("Cover letters written", c["covers"]),
+        ]
+        rows = "<table class='counts'>" + "".join(
+            f"<tr><td>{label}</td><td><b>{n}</b></td></tr>" for label, n in steps) + "</table>"
+
     body = f"""<h1>ApplyPilot</h1>
-<p><a href="/">Dashboard</a> · {links}</p>
-{setup}
-<pre>{html.escape(json.dumps(s, indent=2))}</pre>
-<form method="post" action="/run"><button>Run pipeline now</button></form>"""
+<p style="font-size:18px">{headline}</p>
+<p class="hint">{detail}</p>
+{rows}
+<a class="big" href="/">See jobs found (dashboard)</a>
+<p><a href="/files/tailored_resumes/">Tailored resumes</a> · <a href="/files/cover_letters/">Cover letters</a>
+ · <a href="/setup">Edit setup</a></p>
+<details><summary class="hint">More options</summary>
+<p class="hint">Searches run automatically every few hours. Use this only to start one right now;
+it does nothing while a search is already running.</p>
+<form method="post" action="/run"><button>Start a search now</button></form></details>"""
     return page("ApplyPilot status", body)
 
 
@@ -262,6 +340,12 @@ class Handler(BaseHTTPRequestHandler):
             if seed_config():
                 return self._send(303, b"", "text/plain", {"Location": "/setup"})
             dash = DATA_DIR / "dashboard.html"
+            if (DATA_DIR / "applypilot.db").exists():
+                try:  # rebuild so jobs found mid-run show up
+                    from applypilot.view import generate_dashboard as _gen
+                    _gen(str(dash))
+                except Exception as e:  # noqa: BLE001 - fall back to the last generated dashboard
+                    log(f"Dashboard refresh failed: {e}")
             if dash.exists():
                 return self._send(200, dash.read_bytes())
             return self._send(200, status_html())
