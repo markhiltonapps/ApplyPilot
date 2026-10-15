@@ -6,6 +6,7 @@ worker profile setup/cloning, and cross-platform process cleanup.
 
 import json
 import logging
+import os
 import platform
 import shutil
 import subprocess
@@ -100,9 +101,13 @@ def _kill_on_port(port: int) -> None:
 def setup_worker_profile(worker_id: int) -> Path:
     """Create an isolated Chrome profile for a worker.
 
-    On first run, clones from an existing worker profile (preferred, since
-    it already has session cookies) or from the user's real Chrome profile.
-    Subsequent runs reuse the existing worker profile.
+    By default each worker gets a fresh, empty profile. Copying the user's real
+    Chrome profile (set APPLYPILOT_CHROME_CLONE=1) can mean gigabytes and many
+    minutes on first launch, and recent Chrome versions bind saved cookies to the
+    original profile, so the copy rarely keeps anyone signed in anyway.
+
+    A profile only counts as ready once a marker file is written, so a copy that
+    was interrupted part-way is thrown away and rebuilt.
 
     Args:
         worker_id: Numeric worker identifier.
@@ -111,16 +116,26 @@ def setup_worker_profile(worker_id: int) -> Path:
         Path to the worker's Chrome user-data directory.
     """
     profile_dir = config.CHROME_WORKER_DIR / f"worker-{worker_id}"
-    if (profile_dir / "Default").exists():
-        return profile_dir  # Already initialized
+    ready = profile_dir / ".applypilot-ready"
+    if ready.exists():
+        return profile_dir
+    if profile_dir.exists():
+        shutil.rmtree(profile_dir, ignore_errors=True)  # incomplete from an interrupted setup
+    profile_dir.mkdir(parents=True, exist_ok=True)
 
-    # Find a source: prefer existing worker (has session cookies), else user profile
+    if os.environ.get("APPLYPILOT_CHROME_CLONE", "").strip() not in ("1", "true", "yes"):
+        (profile_dir / "Default").mkdir(exist_ok=True)
+        ready.write_text("fresh", encoding="utf-8")
+        logger.info("[worker-%d] Using a fresh Chrome profile", worker_id)
+        return profile_dir
+
+    # Clone mode: prefer an existing worker (has session cookies), else the user profile
     source: Path | None = None
     for wid in range(10):
         if wid == worker_id:
             continue
         candidate = config.CHROME_WORKER_DIR / f"worker-{wid}"
-        if (candidate / "Default").exists():
+        if (candidate / ".applypilot-ready").exists() and (candidate / "Default").exists():
             source = candidate
             break
     if source is None:
@@ -128,7 +143,6 @@ def setup_worker_profile(worker_id: int) -> Path:
 
     logger.info("[worker-%d] Copying Chrome profile from %s (first time setup)...",
                 worker_id, source.name)
-    profile_dir.mkdir(parents=True, exist_ok=True)
 
     # Copy essential profile dirs -- skip caches and heavy transient data
     skip = {
@@ -140,7 +154,7 @@ def setup_worker_profile(worker_id: int) -> Path:
     }
 
     for item in source.iterdir():
-        if item.name in skip:
+        if item.name in skip or item.name == ".applypilot-ready":
             continue
         dst = profile_dir / item.name
         try:
@@ -156,6 +170,8 @@ def setup_worker_profile(worker_id: int) -> Path:
         except (PermissionError, OSError):
             pass  # skip locked files
 
+    (profile_dir / "Default").mkdir(exist_ok=True)
+    ready.write_text("cloned", encoding="utf-8")
     return profile_dir
 
 
