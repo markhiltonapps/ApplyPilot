@@ -821,8 +821,10 @@ while it works.</p>
         status = f"""<div class="card status"><span class="dot warn"></span><div>
 <div class="head">Your PC isn't connected</div>
 <p class="muted">Last seen {_ago(agent.get("last_seen"))}. The companion starts by itself when Windows starts.
-If the PC is on, open the Start menu, type <b>ApplyPilot Companion</b> and press Enter. This page updates when it
-connects.</p></div></div>"""
+If the PC is on, open the Start menu, type <b>ApplyPilot Companion</b> and press Enter. If you changed your
+site password, run the companion once from PowerShell instead (steps below) so it can sign in again.</p>
+<a class="btn ghost sm" style="margin-top:10px" href="/companion.py" download="ApplyPilot-Companion.py">Download
+the companion</a></div></div>"""
     else:
         status = """<div class="card status"><span class="dot"></span><div>
 <div class="head">Set up your PC once</div>
@@ -883,7 +885,7 @@ submitting, so you can check it. <b>Apply</b> submits it.</p>
         controls = """<div class="card empty"><div class="big">📭</div><h2>Nothing to auto-apply right now</h2>
 <p class="muted">New matches show up here after each search.</p></div>"""
 
-    setup_open = "" if agent.get("last_seen") else " open"
+    setup_open = "" if online else " open"  # folded away only while the PC is connected
     body = f"""<h1>Auto-apply</h1>
 <p class="sub">Claude fills in applications for you in Chrome on your Windows PC. You start and watch it here.</p>
 <div class="stack">{status}{last_html}{controls}</div>
