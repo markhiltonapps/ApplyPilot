@@ -34,8 +34,9 @@ import time
 from datetime import UTC, datetime
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
-from urllib.parse import unquote, urlparse
+from urllib.parse import parse_qs, unquote, urlparse
 
+import editor
 import setup_form
 import ui
 
@@ -258,7 +259,7 @@ def scheduler() -> None:
 # ---------------------------------------------------------------------------
 
 def page(title: str, body: str, active: str = "", head: str = "") -> bytes:
-    return ui.shell(title, body, active, extra_css=setup_form.FORM_CSS, head=head)
+    return ui.shell(title, body, active, extra_css=setup_form.FORM_CSS + editor.EDITOR_CSS, head=head)
 
 
 def job_counts() -> dict[str, int] | None:
@@ -405,6 +406,32 @@ def _review_note(tailored_path: str | None) -> str:
     return issues[:700] + ("…" if len(issues) > 700 else "")
 
 
+def _rel(path_str: str | None) -> str:
+    try:
+        return Path(path_str).resolve().relative_to(DATA_DIR.resolve()).as_posix() if path_str else ""
+    except ValueError:
+        return ""
+
+
+def _job_for(doc: Path) -> tuple[str, str]:
+    """(job title line, 'resume' or 'cover letter') for a tailored document."""
+    import sqlite3
+    kind = "resume" if doc.parent.name == "tailored_resumes" else "cover letter"
+    col = "tailored_resume_path" if kind == "resume" else "cover_letter_path"
+    try:
+        conn = sqlite3.connect(f"file:{DATA_DIR / 'applypilot.db'}?mode=ro", uri=True, timeout=5)
+        row = conn.execute(f"SELECT title, site FROM jobs WHERE {col} = ?", (str(doc),)).fetchone()
+        conn.close()
+    except sqlite3.Error:
+        row = None
+    return (f"{row[0]} · {row[1]}" if row else doc.stem.replace("_", " ")), kind
+
+
+def edit_html(doc: Path, rel: str, message: str = "") -> bytes:
+    title, kind = _job_for(doc)
+    return page(f"Edit {kind}", editor.page_body(doc, rel, title, kind, message), "ready")
+
+
 def ready_html() -> bytes:
     import sqlite3
     db = DATA_DIR / "applypilot.db"
@@ -444,13 +471,23 @@ def ready_html() -> bytes:
             actions.append(f'<a class="btn primary sm" href="{html.escape(apply_url)}" target="_blank" '
                            f'rel="noopener">Apply &rarr;</a>')
         note = _review_note(j["tailored_resume_path"])
+        resume_rel = html.escape(_rel(j["tailored_resume_path"]), quote=True)
+        cover_rel = html.escape(_rel(j["cover_letter_path"]), quote=True)
         review = (f'<details class="review"><summary>⚠ Check this resume before sending</summary>'
-                  f'<p>{html.escape(note).replace(chr(10), "<br>")}</p></details>' if note else "")
+                  f'<p>{html.escape(note).replace(chr(10), "<br>")}</p>'
+                  f'<a class="btn primary sm" href="/edit?f={resume_rel}">Fix it in the editor</a></details>'
+                  if note else "")
+        edits = [f'<a href="/edit?f={resume_rel}">Edit resume</a>'] if resume_rel else []
+        if cover_rel:
+            edits.append(f'<a href="/edit?f={cover_rel}">Edit cover letter</a>')
+        if resume_rel:
+            edits.append(f'<a href="/docx?f={resume_rel}">Resume as Word</a>')
+        edit_links = f'<div class="muted small">{" &middot; ".join(edits)}</div>' if edits else ""
         cards.append(f"""<div class="card job"><div class="job-top">
 <div class="score{'' if score >= 7 else ' mid'}">{score}</div><div>
 <a class="job-title" href="{html.escape(j['url'] or apply_url)}" target="_blank" rel="noopener">
 {html.escape(j['title'] or 'Untitled')}</a><div class="meta">{meta}</div></div></div>
-{review}<div class="row" style="gap:8px">{''.join(actions)}</div></div>""")
+{review}<div class="row" style="gap:8px">{''.join(actions)}</div>{edit_links}</div>""")
     body = f"""<h1>Ready to apply</h1>
 <p class="sub">{len(jobs)} job{'s' if len(jobs) != 1 else ''} with a tailored resume, best match first. Download the
 resume, then tap Apply.</p>
@@ -513,6 +550,16 @@ class Handler(BaseHTTPRequestHandler):
         if not self._authorized():
             return
 
+        if path in ("/edit", "/docx"):
+            rel = parse_qs(urlparse(self.path).query).get("f", [""])[0]
+            doc = editor.resolve(DATA_DIR, rel)
+            if not doc:
+                return self._send(404, b"Not found", "text/plain")
+            if path == "/edit":
+                return self._send(200, edit_html(doc, rel))
+            return self._send(200, editor.to_docx(doc.read_text(encoding="utf-8")),
+                              "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+                              {"Content-Disposition": f'attachment; filename="{doc.stem}.docx"'})
         if path == "/resume.txt":
             resume = DATA_DIR / "resume.txt"
             if resume.exists():
@@ -559,18 +606,40 @@ class Handler(BaseHTTPRequestHandler):
 
     def do_POST(self):
         path = urlparse(self.path).path
-        if path not in ("/run", "/setup"):
+        if path not in ("/run", "/setup", "/edit"):
             return self._send(404, b"Not found", "text/plain")
         if not self._authorized():
             return
         if path == "/setup":
             return self._post_setup()
+        if path == "/edit":
+            return self._post_edit()
         if _run_lock.locked():
             msg = "Pipeline is already running."
         else:
             threading.Thread(target=run_pipeline, daemon=True).start()
             msg = "Pipeline started."
         self._send(303, msg.encode(), "text/plain", {"Location": "/status"})
+
+    def _post_edit(self):
+        length = int(self.headers.get("Content-Length") or 0)
+        if length > 2 * 1024 * 1024:
+            return self._send(413, b"Too large", "text/plain")
+        form = parse_qs(self.rfile.read(length).decode("utf-8", errors="replace"), keep_blank_values=True)
+        rel = form.get("f", [""])[0]
+        doc = editor.resolve(DATA_DIR, rel)
+        if not doc:
+            return self._send(404, b"Not found", "text/plain")
+        if form.get("action", ["save"])[0] == "checked":
+            editor.mark_checked(doc)
+            return self._send(303, b"", "text/plain", {"Location": "/ready"})
+        content = form.get("content", [""])[0]
+        if not content.strip():
+            return self._send(200, edit_html(doc, rel, "Nothing saved: the text was empty."))
+        problem = editor.save(doc, content)
+        editor.mark_checked(doc)
+        log(f"Edited {rel}")
+        return self._send(200, edit_html(doc, rel, problem or "Saved. The PDF has been rebuilt with your changes."))
 
     def _post_setup(self):
         length = int(self.headers.get("Content-Length") or 0)

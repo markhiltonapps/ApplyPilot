@@ -16,11 +16,11 @@ COPY src ./src
 
 RUN pip install . \
     && pip install --no-deps python-jobspy \
-    && pip install pydantic tls-client requests markdownify regex curl_cffi pypdf \
+    && pip install pydantic tls-client requests markdownify regex curl_cffi pypdf python-docx \
     && playwright install --with-deps chromium \
     && rm -rf /var/lib/apt/lists/*
 
-COPY deploy/server.py deploy/setup_form.py deploy/ui.py ./deploy/
+COPY deploy/*.py ./deploy/
 
 # Data lives in $APPLYPILOT_DIR (/data); mount a persistent volume there.
 EXPOSE 8080
