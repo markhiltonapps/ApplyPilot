@@ -11,6 +11,7 @@ import html
 TABS = (
     ("/", "Jobs", "jobs"),
     ("/ready", "Ready to apply", "ready"),
+    ("/applied", "Applied", "applied"),
     ("/autoapply", "Auto-apply", "auto"),
     ("/status", "Status", "status"),
     ("/setup", "Setup", "setup"),

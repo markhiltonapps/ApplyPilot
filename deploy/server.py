@@ -472,6 +472,9 @@ def _job_card(j, applied_keys: set[str]) -> str:
         edits.append(f'<a href="/edit?f={cover_rel}">Edit cover letter</a>')
     if resume_rel:
         edits.append(f'<a href="/docx?f={resume_rel}">Resume as Word</a>')
+    if applied and (j["url"] or apply_url):
+        edits.append(f'<a href="{html.escape(j["url"] or apply_url)}" target="_blank" rel="noopener">'
+                     f'View job posting</a>')
     edit_links = f'<div class="muted small">{" &middot; ".join(edits)}</div>' if edits else ""
     if applied:
         when = (j["applied_at"] or "")[:10]
@@ -490,7 +493,7 @@ def _job_card(j, applied_keys: set[str]) -> str:
 {dup}{review}<div class="row" style="gap:8px">{''.join(actions)}</div>{mark}{edit_links}</div>"""
 
 
-def ready_html() -> bytes:
+def _tailored_jobs() -> list:
     import sqlite3
     db = DATA_DIR / "applypilot.db"
     jobs = []
@@ -505,6 +508,28 @@ def ready_html() -> bytes:
             conn.close()
         except sqlite3.Error as e:
             log(f"Ready page query failed: {e}")
+    return jobs
+
+
+def applied_html() -> bytes:
+    jobs = _tailored_jobs()
+    done = sorted((j for j in jobs if j["applied_at"]), key=lambda j: j["applied_at"], reverse=True)
+    keys = {_dup_key(j["title"], j["site"]) for j in done}
+    if not done:
+        body = """<h1>Applied</h1><div class="card empty"><div class="big">📬</div><h2>No applications yet</h2>
+<p class="muted">When you tick <b>I applied to this job</b> on Ready to apply, or auto-apply submits one, it shows
+up here with the resume and cover letter that went with it.</p><a class="btn ghost" href="/ready">Go to Ready to
+apply</a></div>"""
+        return page("Applied", body, "applied")
+    body = f"""<h1>Applied</h1>
+<p class="sub">{len(done)} application{'s' if len(done) != 1 else ''}, newest first, with the resume and cover letter
+you sent. Tap <b>Undo</b> to move one back to Ready to apply.</p>
+<div class="stack">{"".join(_job_card(j, keys) for j in done)}</div>"""
+    return page("Applied", body, "applied")
+
+
+def ready_html() -> bytes:
+    jobs = _tailored_jobs()
     if not jobs:
         c = job_counts() or {"good_fit": 0}
         note = (f"{c['good_fit']} good fits found so far. Their resumes are being written now."
@@ -521,11 +546,8 @@ def ready_html() -> bytes:
     todo_html = "".join(_job_card(j, applied_keys) for j in todo) or (
         '<div class="card empty"><div class="big">🎉</div><h2>All caught up</h2>'
         '<p class="muted">New matches appear here after each search.</p></div>')
-    done_html = ""
-    if done:
-        done_html = (f'<details class="card" style="margin-top:22px"><summary><b>Applied ({len(done)})</b>'
-                     f'</summary><div class="stack" style="margin-top:14px">'
-                     f'{"".join(_job_card(j, applied_keys) for j in done)}</div></details>')
+    done_html = (f'<a class="btn ghost" style="margin-top:18px;display:flex" href="/applied">'
+                 f'See your {len(done)} applied job{"s" if len(done) != 1 else ""} &rarr;</a>' if done else "")
     body = f"""<h1>Ready to apply</h1>
 <p class="sub">{len(todo)} to apply, best match first{f", {len(done)} applied" if done else ""}. Download the resume,
 apply, then tick <b>I applied</b> so you never apply twice.</p>
@@ -781,6 +803,8 @@ class Handler(BaseHTTPRequestHandler):
             return self._send(200, status_html())
         if path == "/ready":
             return self._send(200, ready_html())
+        if path == "/applied":
+            return self._send(200, applied_html())
         if path == "/status.json":
             with _state_lock:
                 return self._send(200, json.dumps(state).encode(), "application/json")
@@ -826,7 +850,8 @@ class Handler(BaseHTTPRequestHandler):
             form = parse_qs(self.rfile.read(min(length, 65536)).decode("utf-8", errors="replace"))
             url = form.get("url", [""])[0]
             mark_applied(url, form.get("action", ["applied"])[0] == "applied")
-            return self._send(303, b"", "text/plain", {"Location": "/ready"})
+            back = "/applied" if "/applied" in (self.headers.get("Referer") or "") else "/ready"
+            return self._send(303, b"", "text/plain", {"Location": back})
         if _run_lock.locked():
             msg = "Pipeline is already running."
         else:
