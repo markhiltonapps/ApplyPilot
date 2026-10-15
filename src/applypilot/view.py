@@ -23,6 +23,26 @@ from applypilot.database import get_connection
 console = Console()
 
 
+def _doc_link(path_str: str | None, label: str) -> str:
+    """Link to a job's tailored resume or cover letter (the PDF when it exists).
+
+    The href is relative to APP_DIR, where the dashboard is written, so it
+    works both opened from disk and served over HTTP.
+    """
+    if not path_str:
+        return ""
+    path = Path(path_str)
+    if path.with_suffix(".pdf").exists():
+        path = path.with_suffix(".pdf")
+    elif not path.exists():
+        return ""
+    try:
+        href = path.resolve().relative_to(APP_DIR.resolve()).as_posix()
+    except ValueError:
+        href = path.resolve().as_uri()
+    return f'<a href="{escape(href)}" class="doc-link" target="_blank">{escape(label)}</a>'
+
+
 def generate_dashboard(output_path: str | None = None) -> str:
     """Generate an HTML dashboard of all jobs with fit scores.
 
@@ -76,7 +96,7 @@ def generate_dashboard(output_path: str | None = None) -> str:
     jobs = conn.execute("""
         SELECT url, title, salary, description, location, site, strategy,
                full_description, application_url, detail_error,
-               fit_score, score_reasoning
+               fit_score, score_reasoning, tailored_resume_path, cover_letter_path
         FROM jobs
         WHERE fit_score >= 5
         ORDER BY fit_score DESC, site, title
@@ -177,6 +197,9 @@ def generate_dashboard(output_path: str | None = None) -> str:
         apply_html = ""
         if apply_url:
             apply_html = f'<a href="{apply_url}" class="apply-link" target="_blank">Apply</a>'
+        elif url:
+            apply_html = f'<a href="{url}" class="apply-link" target="_blank">View job</a>'
+        docs_html = _doc_link(j["tailored_resume_path"], "Resume") + _doc_link(j["cover_letter_path"], "Cover letter")
 
         job_sections += f"""
         <div class="job-card" data-score="{score}" data-site="{escape(j['site'] or '')}" data-location="{location.lower()}">
@@ -189,7 +212,7 @@ def generate_dashboard(output_path: str | None = None) -> str:
           {f'<div class="reasoning-row">{escape(reasoning)}</div>' if reasoning else ''}
           <p class="desc-preview">{desc_preview}...</p>
           {"<details class='full-desc-details'><summary class='expand-btn'>Full Description (" + f'{desc_len:,}' + " chars)</summary><div class='full-desc'>" + full_desc_html + "</div></details>" if j["full_description"] else ""}
-          <div class="card-footer">{apply_html}</div>
+          <div class="card-footer">{docs_html}{apply_html}</div>
         </div>"""
 
     if current_score is not None:
@@ -277,7 +300,9 @@ def generate_dashboard(output_path: str | None = None) -> str:
 
   .desc-preview {{ font-size: 0.8rem; color: #64748b; line-height: 1.5; margin-bottom: 0.75rem; max-height: 3.6em; overflow: hidden; }}
 
-  .card-footer {{ display: flex; justify-content: flex-end; }}
+  .card-footer {{ display: flex; justify-content: flex-end; gap: 0.5rem; flex-wrap: wrap; }}
+  .doc-link {{ font-size: 0.8rem; color: #10b981; text-decoration: none; padding: 0.3rem 0.8rem; border: 1px solid #10b98155; border-radius: 6px; font-weight: 500; }}
+  .doc-link:hover {{ background: #10b98122; }}
   .apply-link {{ font-size: 0.8rem; color: #60a5fa; text-decoration: none; padding: 0.3rem 0.8rem; border: 1px solid #60a5fa33; border-radius: 6px; font-weight: 500; }}
   .apply-link:hover {{ background: #60a5fa22; }}
 

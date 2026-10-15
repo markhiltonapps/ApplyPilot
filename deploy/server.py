@@ -187,7 +187,7 @@ background:#0f1115;color:#e6e6e6;line-height:1.45}}a{{color:#7cb7ff}}code,pre{{b
 padding:2px 6px;border-radius:4px}}pre{{padding:12px;white-space:pre-wrap;word-break:break-word}}
 button{{padding:8px 14px}}table.counts{{width:100%;border-collapse:collapse;margin:12px 0}}
 table.counts td{{padding:8px 4px;border-bottom:1px solid var(--line)}}table.counts td:last-child{{text-align:right}}
-.hint{{color:var(--muted)}}.big{{display:block;text-align:center;padding:14px;border-radius:10px;
+.hint{{color:var(--muted)}}.guide{{background:#171b22;border:1px solid var(--line);border-radius:10px;padding:10px 14px;margin:16px 0}}.guide li{{margin:8px 0}}.big{{display:block;text-align:center;padding:14px;border-radius:10px;
 background:#2f6fed;color:#fff;font-weight:600;text-decoration:none;margin:12px 0}}
 {setup_form.FORM_CSS}</style></head>
 <body>{body}</body></html>""".encode()
@@ -277,6 +277,22 @@ def status_html() -> bytes:
 <a class="big" href="/">See jobs found (dashboard)</a>
 <p><a href="/files/tailored_resumes/">Tailored resumes</a> · <a href="/files/cover_letters/">Cover letters</a>
  · <a href="/setup">Edit setup</a></p>
+<details class="guide"{" open" if not (c and c["tailored"]) else ""}><summary><b>How to use ApplyPilot</b></summary>
+<ol>
+<li><b>Wait for a search to finish.</b> Every 12 hours ApplyPilot finds new jobs, scores each one 1&ndash;10
+ against your resume, then writes a tailored resume and a cover letter for every job scoring 7 or higher.
+ You don't need to press anything.</li>
+<li><b>Open the dashboard</b> with the blue button above. Tap <b>7+ Strong</b> to see only your best matches.
+ Each card shows why it scored that way.</li>
+<li><b>Pick a job</b> and tap the green <b>Resume</b> button to download the resume written for that job.
+ Read it over and fix anything that isn't quite right.</li>
+<li><b>Tap Apply</b> (or View job) to open the real job posting, and apply there using that resume.</li>
+<li><b>Cover letter (optional):</b> if the application asks for one, tap the green <b>Cover letter</b>
+ button, copy it, and paste or upload it.</li>
+</ol>
+<p class="hint">Green buttons only appear on jobs scoring 7+, once their resume has been written.
+ To change the jobs it looks for, use <a href="/setup">Edit setup</a>.</p>
+</details>
 <details><summary class="hint">More options</summary>
 <p class="hint">Searches run automatically every few hours. Use this only to start one right now;
 it does nothing while a search is already running.</p>
@@ -355,6 +371,8 @@ class Handler(BaseHTTPRequestHandler):
             with _state_lock:
                 return self._send(200, json.dumps(state).encode(), "application/json")
 
+        if path.split("/")[1] in SERVED_DIRS:  # dashboard links are relative to the data dir
+            path = "/files" + path
         if path.startswith("/files/"):
             rel = path[len("/files/"):].strip("/")
             top = rel.split("/", 1)[0]
