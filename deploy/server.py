@@ -553,7 +553,9 @@ def ready_html() -> bytes:
     done_html = (f'<a class="btn ghost" style="margin-top:18px;display:flex" href="/applied">'
                  f'See your {len(done)} applied job{"s" if len(done) != 1 else ""} &rarr;</a>' if done else "")
     body = f"""<h1>Ready to apply</h1>
-<p class="sub">{len(todo)} to apply, best match first{f", {len(done)} applied" if done else ""}. Download the resume,
+<p class="sub">{len(todo)} to apply, best match first{f", {len(done)} applied" if done else ""}. These are all
+jobs scoring {setup_form.saved_min_score(DATA_DIR)} or more ({sum(1 for j in todo if (j["fit_score"] or 0) >= 7)} of
+them score 7+, which the Jobs tab calls a strong fit). Download the resume,
 apply, then tick <b>I applied</b> so you never apply twice.</p>
 <div class="stack">{todo_html}</div>{done_html}"""
     return page("Ready to apply", body, "ready")

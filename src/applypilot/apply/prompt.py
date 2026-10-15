@@ -70,6 +70,9 @@ def _build_profile_summary(profile: dict) -> str:
         lines.append(f"Years Experience: {exp['years_of_experience_total']}")
     if exp.get("education_level"):
         lines.append(f"Education: {exp['education_level']}")
+    school = profile.get("resume_facts", {}).get("preserved_school")
+    if school:
+        lines.append(f"School: {school}")
 
     # Availability
     lines.append(f"Available: {avail.get('earliest_start_date', 'Immediately')}")
@@ -189,7 +192,11 @@ sexual orientation), choose "Decline to self-identify" / "Prefer not to say".
 These are often custom dropdowns where a click can silently fail or land on the wrong option. After answering
 each EEO question, take a fresh snapshot and confirm the field now SHOWS the profile answer; if it still shows a
 placeholder or a decline, select it again (type the option text and press Enter if clicking doesn't stick).
-Answer the disability question too when the form has one (it may be its own section at the bottom)."""
+Answer the disability question too when the form has one (it may be its own section at the bottom).
+
+Education sections -> fill them from the profile's Education and School lines even when optional: school name
+(search the school dropdown for it; pick the closest match), degree (e.g. Bachelor's), and field of study. Leave
+graduation dates and GPA blank unless the form requires them -- never invent them."""
 
 
 def _build_hard_rules(profile: dict) -> str:

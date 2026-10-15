@@ -22,13 +22,14 @@ import os
 import shutil
 import subprocess
 import sys
+import threading
 import time
 import urllib.error
 import urllib.request
 import zipfile
 from pathlib import Path
 
-VERSION = "4"
+VERSION = "5"
 SERVER = "__SERVER_URL__"  # filled in by the server when you download this file
 USER = "applypilot"
 MODEL = os.environ.get("APPLYPILOT_MODEL", "sonnet")  # Claude model used to fill in forms
@@ -238,10 +239,27 @@ def apply_now(limit: int, min_score: int, practice: bool, url: str | None = None
               password: str = "") -> None:
     from applypilot.apply.launcher import main as apply_main
     started = time.time()
+    stop = threading.Event()
+    if not practice:  # move each submitted job to the site's Applied tab as soon as it's done
+        threading.Thread(target=_report_as_you_go, args=(password, stop), daemon=True).start()
     try:
         apply_main(limit=limit, target_url=url, min_score=min_score, model=MODEL, dry_run=practice, workers=1)
     finally:
+        stop.set()
         send_logs(password, started, practice)
+
+
+def _report_as_you_go(password: str, stop: threading.Event) -> None:
+    sent: set[str] = set()
+    while not stop.wait(15):
+        try:
+            new = [r for r in run_results() if r["status"] == "applied" and r["url"] not in sent]
+            if new:
+                request("/api/results", password, data=json.dumps({"results": new}).encode(), timeout=60)
+                sent.update(r["url"] for r in new)
+                say(f"  Marked {len(new)} job(s) as applied on your site.")
+        except Exception:  # noqa: BLE001 - the full report at the end covers anything missed here
+            pass
 
 
 def send_logs(password: str, since: float, practice: bool) -> None:
