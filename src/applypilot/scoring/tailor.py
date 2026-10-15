@@ -327,7 +327,8 @@ def judge_tailored_resume(
     ]
 
     client = get_client()
-    response = client.chat(messages, max_tokens=512, temperature=0.1)
+    # Room for a full list of issues; at 512 tokens the judge's notes were cut off.
+    response = client.chat(messages, max_tokens=1024, temperature=0.1)
 
     passed = "VERDICT: PASS" in response.upper()
     issues = "none"
