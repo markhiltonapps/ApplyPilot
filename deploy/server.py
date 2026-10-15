@@ -465,6 +465,10 @@ class Handler(BaseHTTPRequestHandler):
         if not self._authorized():
             return
 
+        if path == "/resume.txt":
+            resume = DATA_DIR / "resume.txt"
+            if resume.exists():
+                return self._send(200, resume.read_bytes(), "text/plain; charset=utf-8")
         if path == "/setup":
             return self._send(200, page("ApplyPilot setup", setup_form.render(DATA_DIR, os.environ), "setup"))
         if path == "/":

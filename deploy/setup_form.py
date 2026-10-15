@@ -467,7 +467,8 @@ def render(data_dir: Path, environ: dict, values: dict[str, str] | None = None,
     resume_path = data_dir / "resume.txt"
     if resume_path.exists():
         words = len(resume_path.read_text(encoding="utf-8").split())
-        resume_note = f"✅ Resume saved ({words} words). Upload a new file only if you want to replace it."
+        resume_note = (f'✅ Resume saved ({words} words, <a href="/resume.txt" target="_blank">view it</a>). '
+                       "Upload a new file only if you want to replace it.")
     else:
         resume_note = "PDF, Word (.docx) or text file."
     provider = v.get("provider") or current_provider(data_dir)
