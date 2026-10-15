@@ -464,6 +464,9 @@ def _job_card(j, applied_keys: set[str]) -> str:
         reason = (j["apply_error"] or status).replace("_", " ")
         dup = (f'<div class="muted small">Auto-apply couldn&rsquo;t finish this one ({html.escape(reason[:120])}). '
                f'Apply by hand.</div>')
+    if not applied and not dup and needs_account(apply_url):
+        dup = ('<div class="muted small">🔑 Apply by hand: this company\'s site needs an account, '
+               'so auto-apply skips it.</div>')
     if not applied and _dup_key(j["title"], j["site"]) in applied_keys:
         dup = ('<div class="review" style="margin:0"><b style="color:var(--warn)">You already applied to a job '
                'with this title here.</b> It\'s probably the same posting listed twice.</div>')
@@ -575,6 +578,16 @@ def package_tarball() -> bytes:
     return _package_cache
 
 
+# Application sites that require creating an account (usually with an emailed code) before applying.
+# Auto-apply can't get past those, so they're left for the person to do by hand.
+ACCOUNT_SITES = ("myworkdayjobs.com", "workday.com", "oraclecloud.com", "taleo.net", "successfactors",
+                 "paycomonline.net", "icims.com", "ultipro.com", "brassring.com")
+
+
+def needs_account(url: str | None) -> bool:
+    return bool(url) and any(site in url.lower() for site in ACCOUNT_SITES)
+
+
 def apply_bundle() -> bytes:
     """Everything the companion needs to auto-apply: profile, jobs left to apply to, and their documents."""
     import io
@@ -597,7 +610,8 @@ def apply_bundle() -> bytes:
         if key not in seen:
             seen.add(key)
             unique.append(r)
-    rows = unique
+    rows = [r for r in unique if not needs_account(r["application_url"] or r["url"])]
+    account_only = len(unique) - len(rows)
     conn.close()
     buf = io.BytesIO()
     jobs = []
@@ -621,7 +635,8 @@ def apply_bundle() -> bytes:
                             written.add(name)
             jobs.append(job)
         z.writestr("manifest.json", json.dumps({
-            "jobs": jobs, "min_score": int(setup_form.saved_min_score(DATA_DIR)), "created": now_iso()}))
+            "jobs": jobs, "needs_account": account_only,
+            "min_score": int(setup_form.saved_min_score(DATA_DIR)), "created": now_iso()}))
     return buf.getvalue()
 
 

@@ -115,6 +115,22 @@ def ensure_installed(cfg: dict, password: str) -> None:
     save_config(cfg)
 
 
+def self_update(password: str) -> None:
+    """Replace this file with the server's latest companion and restart it, if they differ."""
+    if os.environ.get("APPLYPILOT_COMPANION_UPDATED"):
+        return
+    try:
+        latest = request("/companion.py", password, timeout=60)
+    except (urllib.error.URLError, OSError):
+        return
+    me = Path(__file__).resolve()
+    if latest.strip() and latest != me.read_bytes():
+        say("Updating the companion to the latest version...")
+        me.write_bytes(latest)
+        env = dict(os.environ, APPLYPILOT_COMPANION_UPDATED="1")
+        sys.exit(subprocess.run([sys.executable, str(me), *sys.argv[1:]], env=env, check=False).returncode)
+
+
 def check_tools() -> None:
     problems = []
     if not shutil.which("claude"):
@@ -156,11 +172,9 @@ def download_jobs(password: str) -> dict:
 def build_queue(manifest: dict) -> None:
     """A fresh local job list, so practice runs never leave anything marked as applied."""
     from applypilot.database import get_connection, init_db
-    db = DATA / "applypilot.db"
-    if db.exists():
-        db.unlink()
     init_db()
     conn = get_connection()
+    conn.execute("DELETE FROM jobs")  # emptied, not deleted: Windows won't delete a file that's still open
     for j in manifest["jobs"]:
         conn.execute(
             "INSERT OR REPLACE INTO jobs (url, title, site, location, application_url, fit_score, "
@@ -207,17 +221,20 @@ def report(password: str, results: list[dict]) -> None:
 
 def show_jobs(manifest: dict, min_score: int) -> list[dict]:
     jobs = [j for j in manifest["jobs"] if (j["fit_score"] or 0) >= min_score]
-    say(f"\n{len(jobs)} job(s) ready to apply (score {min_score}+). Best matches:")
-    for j in jobs[:8]:
-        say(f"  {j['fit_score']}  {j['title'][:60]}  ({j['site']})")
-    if len(jobs) > 8:
-        say(f"  ...and {len(jobs) - 8} more")
+    say(f"\n{len(jobs)} job(s) auto-apply can handle (score {min_score}+). Best matches:")
+    for i, j in enumerate(jobs[:10], 1):
+        say(f"  {i:2}. [{j['fit_score']}] {j['title'][:55]}  ({j['site']})")
+    if len(jobs) > 10:
+        say(f"  ...and {len(jobs) - 10} more")
+    skipped = manifest.get("needs_account", 0)
+    if skipped:
+        say(f"  ({skipped} more need an account on the company's site; apply to those by hand.)")
     return jobs
 
 
-def apply_now(limit: int, min_score: int, practice: bool) -> None:
+def apply_now(limit: int, min_score: int, practice: bool, url: str | None = None) -> None:
     from applypilot.apply.launcher import main as apply_main
-    apply_main(limit=limit, min_score=min_score, model=MODEL, dry_run=practice, workers=1)
+    apply_main(limit=limit, target_url=url, min_score=min_score, model=MODEL, dry_run=practice, workers=1)
 
 
 def main() -> None:
@@ -231,6 +248,7 @@ def main() -> None:
     say("ApplyPilot Companion\n" + "=" * 20)
     cfg = load_config()
     password = get_password(cfg)
+    self_update(password)
     ensure_installed(cfg, password)
     check_tools()
 
@@ -243,14 +261,16 @@ def main() -> None:
             say("\nNothing to apply to right now. Run this again after the next search.")
             return
         say("\nWhat would you like to do?")
-        say("  1  Practice run on the top job (fills in the form, does NOT submit)")
+        say("  1  Practice run on a job you pick (fills in the form, does NOT submit)")
         say("  2  Apply for real")
         say("  3  Refresh the job list from the server")
         say("  q  Quit")
         choice = ask("Choose 1, 2, 3 or q:", "q").lower()
         if choice == "1":
-            say("\nOpening Chrome. Watch the form get filled in; nothing will be submitted.")
-            apply_now(1, min_score, practice=True)
+            pick = ask(f"Which job should it practice on? (1-{min(10, len(jobs))}, default 1):", "1")
+            job = jobs[int(pick) - 1] if pick.isdigit() and 1 <= int(pick) <= min(10, len(jobs)) else jobs[0]
+            say(f"\nOpening Chrome for: {job['title']} ({job['site']}). Nothing will be submitted.")
+            apply_now(1, min_score, practice=True, url=job["application_url"] or job["url"])
             say("\nPractice run finished. Nothing was submitted or marked as applied.")
         elif choice == "2":
             n = ask(f"How many jobs should it apply to? (1-{len(jobs)}, default 1):", "1")
