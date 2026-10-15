@@ -455,6 +455,22 @@ def tailor_resume(
 
 # ── Batch Entry Point ────────────────────────────────────────────────────
 
+def _persist_tailor_result(conn, r: dict) -> None:
+    """Record one tailoring attempt; save the resume path only when it was approved."""
+    if r["status"] in ("approved", "approved_with_judge_warning"):
+        conn.execute(
+            "UPDATE jobs SET tailored_resume_path=?, tailored_at=?, "
+            "tailor_attempts=COALESCE(tailor_attempts,0)+1 WHERE url=?",
+            (r["path"], datetime.now(timezone.utc).isoformat(), r["url"]),
+        )
+    else:
+        conn.execute(
+            "UPDATE jobs SET tailor_attempts=COALESCE(tailor_attempts,0)+1 WHERE url=?",
+            (r["url"],),
+        )
+    conn.commit()
+
+
 def run_tailoring(min_score: int = 7, limit: int = 20,
                   validation_mode: str = "normal") -> dict:
     """Generate tailored resumes for high-scoring jobs.
@@ -542,6 +558,7 @@ def run_tailoring(min_score: int = 7, limit: int = 20,
             log.error("%d/%d [ERROR] %s -- %s", completed, len(jobs), job["title"][:40], e)
 
         results.append(result)
+        _persist_tailor_result(conn, result)
         stats[result.get("status", "error")] = stats.get(result.get("status", "error"), 0) + 1
 
         elapsed = time.time() - t0
@@ -554,23 +571,6 @@ def run_tailoring(min_score: int = 7, limit: int = 20,
             rate * 60,
             result["title"][:40],
         )
-
-    # Persist to DB: increment attempt counter for ALL, save path only for approved
-    now = datetime.now(timezone.utc).isoformat()
-    _success_statuses = {"approved", "approved_with_judge_warning"}
-    for r in results:
-        if r["status"] in _success_statuses:
-            conn.execute(
-                "UPDATE jobs SET tailored_resume_path=?, tailored_at=?, "
-                "tailor_attempts=COALESCE(tailor_attempts,0)+1 WHERE url=?",
-                (r["path"], now, r["url"]),
-            )
-        else:
-            conn.execute(
-                "UPDATE jobs SET tailor_attempts=COALESCE(tailor_attempts,0)+1 WHERE url=?",
-                (r["url"],),
-            )
-    conn.commit()
 
     elapsed = time.time() - t0
     log.info(
