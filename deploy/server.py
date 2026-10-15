@@ -243,7 +243,7 @@ def job_counts() -> dict[str, int] | None:
         "found": "SELECT COUNT(*) FROM jobs",
         "described": "SELECT COUNT(*) FROM jobs WHERE full_description IS NOT NULL",
         "scored": "SELECT COUNT(*) FROM jobs WHERE fit_score IS NOT NULL",
-        "good_fit": "SELECT COUNT(*) FROM jobs WHERE fit_score >= 7",
+        "good_fit": f"SELECT COUNT(*) FROM jobs WHERE fit_score >= {int(setup_form.saved_min_score(DATA_DIR))}",
         "tailored": "SELECT COUNT(*) FROM jobs WHERE tailored_resume_path IS NOT NULL",
         "covers": "SELECT COUNT(*) FROM jobs WHERE cover_letter_path IS NOT NULL",
     }
@@ -306,7 +306,7 @@ def status_html() -> bytes:
         for val, label, cls in (
             (c["found"], "Jobs found", ""),
             (c["scored"], "Scored for fit", ""),
-            (c["good_fit"], "Good fits (7+)", " hl"),
+            (c["good_fit"], f"Good fits ({setup_form.saved_min_score(DATA_DIR)}+)", " hl"),
             (c["tailored"], "Resumes written", ""),
             (c["covers"], "Cover letters", ""),
             (nxt.replace("in about ", ""), "Next search", " txt"),
@@ -326,7 +326,7 @@ def status_html() -> bytes:
 <ol class="steps" style="margin-top:16px">
 <li><b>It searches for you.</b> <span class="muted">Every 12 hours it finds jobs matching your titles,
  scores each one 1&ndash;10 against your resume, and writes a tailored resume and cover letter for every job
- scoring 7 or more. Nothing to press.</span></li>
+ scoring {setup_form.saved_min_score(DATA_DIR)} or more (you can change this in Setup). Nothing to press.</span></li>
 <li><b>Open Ready to apply.</b> <span class="muted">Your best matches, highest score first, each with its own
  resume and cover letter.</span></li>
 <li><b>Download the resume.</b> <span class="muted">Tap <b>Resume</b> and read it over. Fix anything that
@@ -378,7 +378,8 @@ def ready_html() -> bytes:
     if not jobs:
         c = job_counts() or {"good_fit": 0}
         note = (f"{c['good_fit']} good fits found so far. Their resumes are being written now."
-                if c["good_fit"] else "Jobs scoring 7 or more will show up here with their own resume and cover letter.")
+                if c["good_fit"] else f"Jobs scoring {setup_form.saved_min_score(DATA_DIR)} or more will show up here "
+                "with their own resume and cover letter.")
         body = f"""<h1>Ready to apply</h1>
 <div class="card empty"><div class="big">📝</div><h2>Nothing ready yet</h2>
 <p class="muted">{note}</p><a class="btn ghost" href="/status">Check progress</a></div>"""

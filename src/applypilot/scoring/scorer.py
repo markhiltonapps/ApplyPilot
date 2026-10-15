@@ -58,21 +58,31 @@ def _parse_score_response(response: str) -> dict:
     """
     score = 0
     keywords = ""
-    reasoning = response
+    reasoning_lines: list[str] = []
+    in_reasoning = False
 
-    for line in response.split("\n"):
-        line = line.strip()
-        if line.startswith("SCORE:"):
+    for raw in response.split("\n"):
+        # Models sometimes bold the labels ("**SCORE:** 7") or vary their case.
+        line = raw.strip().replace("**", "").strip()
+        label = line.split(":", 1)[0].strip().upper() if ":" in line else ""
+        value = line.split(":", 1)[1].strip() if ":" in line else line
+        if label == "SCORE":
+            in_reasoning = False
             try:
-                score = int(re.search(r"\d+", line).group())
+                score = int(re.search(r"\d+", value).group())
                 score = max(1, min(10, score))
             except (AttributeError, ValueError):
                 score = 0
-        elif line.startswith("KEYWORDS:"):
-            keywords = line.replace("KEYWORDS:", "").strip()
-        elif line.startswith("REASONING:"):
-            reasoning = line.replace("REASONING:", "").strip()
+        elif label == "KEYWORDS":
+            in_reasoning = False
+            keywords = value
+        elif label == "REASONING":
+            in_reasoning = True
+            reasoning_lines = [value] if value else []
+        elif in_reasoning and line:
+            reasoning_lines.append(line)
 
+    reasoning = " ".join(reasoning_lines) or response.strip()
     return {"score": score, "keywords": keywords, "reasoning": reasoning}
 
 
