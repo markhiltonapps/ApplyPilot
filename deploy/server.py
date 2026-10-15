@@ -141,13 +141,23 @@ def requeue_failed_scores() -> None:
         n = conn.execute("UPDATE jobs SET fit_score = NULL, scored_at = NULL WHERE fit_score = 0").rowcount
         # Scoring instructions changed since these were scored: score again (keeps jobs that
         # already have a tailored resume).
+        # ...or the resume changed since then: every score is relative to the resume.
+        import hashlib
+
         from applypilot.scoring.scorer import SCORE_PROMPT_VERSION
+        resume = DATA_DIR / "resume.txt"
+        resume_hash = hashlib.sha256(resume.read_bytes()).hexdigest()[:16] if resume.exists() else ""
+        version = f"{SCORE_PROMPT_VERSION}:{resume_hash}"
         marker = DATA_DIR / ".score_prompt_version"
-        if not marker.exists() or marker.read_text().strip() != str(SCORE_PROMPT_VERSION):
+        old_version = marker.read_text().strip() if marker.exists() else ""
+        # Old markers held only the prompt version; treat a matching one as current for this resume.
+        if old_version == str(SCORE_PROMPT_VERSION):
+            marker.write_text(version)
+        elif old_version != version:
             m = conn.execute("UPDATE jobs SET fit_score = NULL, scored_at = NULL "
                              "WHERE fit_score IS NOT NULL AND tailored_resume_path IS NULL").rowcount
-            marker.write_text(str(SCORE_PROMPT_VERSION))
-            log(f"Scoring instructions updated; re-scoring {m} job(s)")
+            marker.write_text(version)
+            log(f"Resume or scoring instructions changed; re-scoring {m} job(s)")
         conn.commit()
         conn.close()
         if n:
