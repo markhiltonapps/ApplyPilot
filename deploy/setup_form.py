@@ -27,6 +27,19 @@ EXCLUDE_TITLES = [
     "co-op", "clearance required", "TS/SCI",
 ]
 
+US_STATES = {
+    "alabama": "AL", "alaska": "AK", "arizona": "AZ", "arkansas": "AR", "california": "CA", "colorado": "CO",
+    "connecticut": "CT", "delaware": "DE", "florida": "FL", "georgia": "GA", "hawaii": "HI", "idaho": "ID",
+    "illinois": "IL", "indiana": "IN", "iowa": "IA", "kansas": "KS", "kentucky": "KY", "louisiana": "LA",
+    "maine": "ME", "maryland": "MD", "massachusetts": "MA", "michigan": "MI", "minnesota": "MN",
+    "mississippi": "MS", "missouri": "MO", "montana": "MT", "nebraska": "NE", "nevada": "NV",
+    "new hampshire": "NH", "new jersey": "NJ", "new mexico": "NM", "new york": "NY", "north carolina": "NC",
+    "north dakota": "ND", "ohio": "OH", "oklahoma": "OK", "oregon": "OR", "pennsylvania": "PA",
+    "rhode island": "RI", "south carolina": "SC", "south dakota": "SD", "tennessee": "TN", "texas": "TX",
+    "utah": "UT", "vermont": "VT", "virginia": "VA", "washington": "WA", "west virginia": "WV",
+    "wisconsin": "WI", "wyoming": "WY", "district of columbia": "DC",
+}
+
 # python-jobspy's Indeed country names for the most common inputs.
 INDEED_COUNTRIES = {
     "us": "usa", "usa": "usa", "united states": "usa", "united states of america": "usa",
@@ -146,6 +159,32 @@ def _lines(value: str) -> list[str]:
     return [s.strip() for s in re.split(r"[\n,]", value or "") if s.strip()]
 
 
+def clean_titles(value: str) -> list[str]:
+    """Job titles from the form, minus words the location checkboxes already cover."""
+    titles: list[str] = []
+    for line in _lines(value):
+        t = re.sub(r"\b(remote|jobs?|hybrid|onsite|on-site)\b", " ", line, flags=re.IGNORECASE)
+        t = re.sub(r"\s+", " ", t).strip(" -:;")
+        if t and t.lower() not in (x.lower() for x in titles):
+            titles.append(t)
+    return titles
+
+
+def _location_accept(f: dict[str, str]) -> list[str]:
+    """Location strings that mark a non-remote job as local.
+
+    Job boards already limit a city search to a radius, so this is kept
+    broad: the city, the state, and the state's ", XX" abbreviation, which
+    is how most listings write it (e.g. "Houston, TX").
+    """
+    state = f.get("state", "").strip()
+    accept = [x for x in (f["city"].strip(), state) if x]
+    abbrev = US_STATES.get(state.lower()) or (state.upper() if len(state) == 2 else "")
+    if abbrev:
+        accept.append(f", {abbrev}")
+    return accept
+
+
 def save(data_dir: Path, fields: dict[str, str], files: dict[str, tuple[str, bytes]], environ: dict) -> list[str]:
     """Validate the form and write ApplyPilot's config files. Returns error messages.
 
@@ -195,6 +234,8 @@ def save(data_dir: Path, fields: dict[str, str], files: dict[str, tuple[str, byt
                         ("country", "Country"), ("titles", "Job titles")):
         if not f.get(name):
             errors.append(f"{label} is required.")
+    if f.get("titles") and not clean_titles(f["titles"]):
+        errors.append("Add at least one job title.")
     if f.get("titles") and not (f.get("want_remote") or f.get("want_local")):
         errors.append("Choose remote jobs, jobs near you, or both.")
 
@@ -203,7 +244,26 @@ def save(data_dir: Path, fields: dict[str, str], files: dict[str, tuple[str, byt
 
     stored = {k: v for k, v in f.items() if k not in ("gemini_key", "resume_text")}
     (data_dir / "setup_form.json").write_text(json.dumps(stored, indent=2), encoding="utf-8")
+    write_config(data_dir, stored)
+    return []
 
+
+def rebuild_from_saved(data_dir: Path) -> bool:
+    """Regenerate profile.json and searches.yaml from the saved form, if there is one.
+
+    Run at startup so improvements to how this file builds the config reach
+    setups saved by an older version.
+    """
+    f = _saved_form(data_dir)
+    if not all(f.get(k) for k in ("full_name", "email", "city", "country", "titles")):
+        return False
+    write_config(data_dir, f)
+    return True
+
+
+def write_config(data_dir: Path, f: dict[str, str]) -> None:
+    """Write profile.json and searches.yaml from validated form values."""
+    titles = clean_titles(f["titles"]) or _lines(f["titles"])
     yes_no = {"yes": "Yes", "no": "No"}
     profile = {
         "personal": {
@@ -244,7 +304,7 @@ def save(data_dir: Path, fields: dict[str, str], files: dict[str, tuple[str, byt
             "education_level": f.get("education", ""),
             "current_job_title": f.get("current_title", ""),
             "current_company": "",
-            "target_role": _lines(f["titles"])[0],
+            "target_role": titles[0],
         },
         "skills_boundary": {"skills": _lines(f.get("skills", ""))},
         "resume_facts": {
@@ -269,10 +329,10 @@ def save(data_dir: Path, fields: dict[str, str], files: dict[str, tuple[str, byt
     if f.get("want_remote"):
         locations.append({"location": "Remote", "remote": True})
     searches = {
-        "queries": [{"query": t, "tier": 1} for t in _lines(f["titles"])],
+        "queries": [{"query": t, "tier": 1} for t in titles],
         "locations": locations,
         # Non-remote jobs are kept only when their location mentions one of these.
-        "location_accept": [x for x in (f["city"], f.get("state", "")) if x] if f.get("want_local") else [],
+        "location_accept": _location_accept(f) if f.get("want_local") else [],
         "location_reject_non_remote": [],
         "defaults": {
             "results_per_site": 50,
@@ -286,7 +346,6 @@ def save(data_dir: Path, fields: dict[str, str], files: dict[str, tuple[str, byt
         + yaml.safe_dump(searches, sort_keys=False, allow_unicode=True),
         encoding="utf-8",
     )
-    return []
 
 
 # ---------------------------------------------------------------------------
@@ -398,8 +457,10 @@ def render(data_dir: Path, environ: dict, values: dict[str, str] | None = None,
 </fieldset>
 
 <fieldset><legend>4. Jobs you want</legend>
-{area("titles", "Job titles to search for", "One per line, e.g. Marketing Manager", req=True,
-       placeholder="Product Marketing Manager")}
+{area("titles", "Job titles to search for",
+       "One job title per line, e.g. AI Solutions Architect. Only titles: no headings, and no "
+       "&ldquo;remote&rdquo; or city names (use the boxes below for that).", req=True,
+       placeholder="AI Solutions Architect")}
 {check("want_remote", "Remote jobs", True)}
 {check("want_local", "Jobs near my city", True)}
 <div class="row"><div>{text("salary_min", "Salary minimum", hint="Yearly, numbers only")}</div>

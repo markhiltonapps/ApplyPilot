@@ -81,6 +81,7 @@ def seed_config() -> list[str]:
     """
     DATA_DIR.mkdir(parents=True, exist_ok=True)
     problems: list[str] = []
+    setup_form.rebuild_from_saved(DATA_DIR)
 
     profile = os.environ.get("APPLYPILOT_PROFILE_JSON", "").strip()
     if profile:

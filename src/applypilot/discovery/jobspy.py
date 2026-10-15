@@ -268,9 +268,12 @@ def _run_one_search(
         log.info("[%s] 0 results", label)
         return {"new": 0, "existing": 0, "errors": 0, "filtered": 0, "total": 0, "label": label}
 
-    # Filter by location before storing
+    # Filter by location before storing. In a remote search, trust the board's
+    # remote flag: many remote listings give a country ("United States") or an
+    # office city as their location and never say "remote".
     before = len(df)
-    df = df[df.apply(lambda row: _location_ok(
+    df = df[df.apply(lambda row: (s.get("remote") and str(row.get("is_remote", "")).lower() == "true")
+                     or _location_ok(
         str(row.get("location", "")) if str(row.get("location", "")) != "nan" else None,
         accept_locs, reject_locs,
     ), axis=1)]
