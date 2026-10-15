@@ -762,7 +762,7 @@ def mark_applied(url: str, applied: bool, status: str = "applied", when: str | N
         return False
 
 
-def _ago(ts: float | None) -> str:
+def _since(ts: float | None) -> str:
     if not ts:
         return "never"
     secs = int(time.time() - ts)
@@ -837,7 +837,7 @@ def autoapply_html(host: str) -> bytes:
         status = f"""<div class="card status"><span class="dot run"></span><div style="flex:1">
 <div class="head">{mode}{": " + esc(running.get("title") or "") if running.get("title") else ""}</div>
 <p>{esc(running.get("message") or "Working...")}</p>
-<p class="muted small">Started {_ago(running.get("started"))}. Chrome is open on your PC; don't use that window
+<p class="muted small">Started {_since(running.get("started"))}. Chrome is open on your PC; don't use that window
 while it works.</p>
 {"" if stopping else '<form method="post" action="/autoapply/stop" style="margin-top:12px"><button class="btn stop sm">Stop</button></form>'}
 </div></div>"""
@@ -855,7 +855,7 @@ while it works.</p>
     elif agent.get("last_seen"):
         status = f"""<div class="card status"><span class="dot warn"></span><div>
 <div class="head">Your PC isn't connected</div>
-<p class="muted">Last seen {_ago(agent.get("last_seen"))}. The companion starts by itself when Windows starts.
+<p class="muted">Last seen {_since(agent.get("last_seen"))}. The companion starts by itself when Windows starts.
 If the PC is on, open the Start menu, type <b>ApplyPilot Companion</b> and press Enter. If you changed your
 site password, run the companion once from PowerShell instead (steps below) so it can sign in again.</p>
 <a class="btn ghost sm" style="margin-top:10px" href="/companion.py" download="ApplyPilot-Companion.py">Download
@@ -871,7 +871,7 @@ the companion</a></div></div>"""
         what = "Practice run" if last.get("mode") == "practice" else "Real run"
         last_html = f"""<div class="card status"><span class="dot {dot}"></span><div>
 <div class="head">Last: {what}{": " + esc(last.get("title") or "") if last.get("title") else ""}</div>
-<p>{esc(last.get("summary") or "")}</p><p class="muted small">Finished {_ago(last.get("finished"))}.</p>
+<p>{esc(last.get("summary") or "")}</p><p class="muted small">Finished {_since(last.get("finished"))}.</p>
 </div></div>"""
 
     ready = online and not busy
