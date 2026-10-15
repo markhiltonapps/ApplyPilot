@@ -61,7 +61,7 @@ h2{font-size:18px;margin:0 0 12px}
 .status .head{font-size:18px;font-weight:600}
 .dot{width:11px;height:11px;border-radius:50%;margin-top:8px;flex:none;background:var(--muted)}
 .dot.run{background:var(--accent);animation:pulse 1.8s infinite}
-.dot.ok{background:var(--good)}.dot.warn{background:var(--warn)}
+.dot.ok{background:var(--good);padding:0;border:0;border-radius:50%;margin:8px 0 0}.dot.warn{background:var(--warn)}
 @keyframes pulse{0%{box-shadow:0 0 0 0 #5b9dff99}70%{box-shadow:0 0 0 10px #5b9dff00}100%{box-shadow:0 0 0 0 #5b9dff00}}
 @media (prefers-reduced-motion:reduce){.dot.run{animation:none}}
 .tiles{display:grid;grid-template-columns:repeat(3,1fr);gap:10px;margin:14px 0}

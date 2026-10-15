@@ -12,7 +12,9 @@ Stage 6 (auto-apply) doesn't run on the server: it needs the Claude Code CLI dri
 3. runs a practice pass (fills in, never submits) or real applications through `applypilot.apply.launcher`,
 4. posts real outcomes to `/api/results`, which marks submitted jobs Applied and notes failures (CAPTCHA, login) on the job card.
 
-Practice runs are never reported. Jobs can also be marked applied by hand on the Ready to apply page.
+Practice runs never mark anything applied. Jobs can also be marked applied by hand on the Ready to apply page.
+
+**Website control.** Run the companion once and answer yes to "Let the website control auto-apply?": it adds Startup and Start-menu shortcuts and runs `companion.py --agent` in a minimized window from then on. The agent polls `/api/agent/poll` every few seconds; the Auto-apply page queues one run at a time (practice on a job, apply to one job, or apply to the next N), shows live progress from `/api/agent/status`, and has a Stop button (the agent kills the run's process tree, Chrome included). Results arrive at `/api/agent/done`, are recorded like `/api/results`, and are summarized on the page. Queue state lives in `/data/autoapply_control.json` (`deploy/agent_control.py`).
 
 ## Railway
 

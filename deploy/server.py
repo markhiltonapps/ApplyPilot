@@ -36,11 +36,13 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import parse_qs, unquote, urlparse
 
+import agent_control
 import editor
 import setup_form
 import ui
 
 DATA_DIR = Path(os.environ.setdefault("APPLYPILOT_DIR", "/data"))
+control = agent_control.Control(DATA_DIR / "autoapply_control.json")
 PORT = int(os.environ.get("PORT", "8080"))
 PASSWORD = os.environ.get("DASHBOARD_PASSWORD", "")
 USER = os.environ.get("DASHBOARD_USER", "applypilot")
@@ -609,11 +611,11 @@ def needs_account(url: str | None) -> bool:
     return bool(url) and any(site in url.lower() for site in ACCOUNT_SITES)
 
 
-def apply_bundle() -> bytes:
-    """Everything the companion needs to auto-apply: profile, jobs left to apply to, and their documents."""
-    import io
+def apply_candidates() -> tuple[list, int]:
+    """Jobs auto-apply can take on, best first, and how many more were left out because they need an account."""
     import sqlite3
-    import zipfile
+    if not (DATA_DIR / "applypilot.db").exists():
+        return [], 0
     conn = sqlite3.connect(f"file:{DATA_DIR / 'applypilot.db'}?mode=ro", uri=True, timeout=10)
     conn.row_factory = sqlite3.Row
     rows = conn.execute(
@@ -634,8 +636,15 @@ def apply_bundle() -> bytes:
             seen.add(key)
             unique.append(r)
     rows = [r for r in unique if not needs_account(r["application_url"] or r["url"])]
-    account_only = len(unique) - len(rows)
     conn.close()
+    return rows, len(unique) - len(rows)
+
+
+def apply_bundle() -> bytes:
+    """Everything the companion needs to auto-apply: profile, jobs left to apply to, and their documents."""
+    import io
+    import zipfile
+    rows, account_only = apply_candidates()
     buf = io.BytesIO()
     jobs = []
     written: set[str] = set()
@@ -706,39 +715,190 @@ def mark_applied(url: str, applied: bool, status: str = "applied", when: str | N
         return False
 
 
+def _ago(ts: float | None) -> str:
+    if not ts:
+        return "never"
+    secs = int(time.time() - ts)
+    if secs < 90:
+        return "just now" if secs < 10 else f"{secs} seconds ago"
+    for size, unit in ((86400, "day"), (3600, "hour"), (60, "minute")):
+        if secs >= size * (2 if size == 86400 else 1.5 if size == 3600 else 1):
+            n = max(1, round(secs / size))
+            return f"{n} {unit}{'s' if n != 1 else ''} ago"
+    return f"{secs} seconds ago"
+
+
+def run_summary(mode: str, results: list[dict], stopped: bool) -> tuple[str, bool]:
+    """Plain-English outcome of a companion run, and whether it went well."""
+    def why(r: dict) -> str:
+        raw = r.get("error") or r.get("status") or ""
+        return FAILURE_WORDS.get(raw, raw.replace("_", " ").replace("failed:", "") or "it didn't finish")
+    done = [r for r in results if r.get("status") == "applied"]
+    other = [r for r in results if r.get("status") != "applied"]
+    if mode == "practice":
+        if done:
+            return ("Practice finished: the form was filled in and NOT submitted. Look it over in the Chrome "
+                    "window on your PC."), True
+        if other:
+            return f"Practice stopped: {why(other[0])}. You can apply to that job by hand.", False
+        return ("Stopped." if stopped else "Practice ended without finishing the form."), False
+    parts = []
+    if done:
+        parts.append(f"Applied to {len(done)} job{'s' if len(done) != 1 else ''}; "
+                     f"{'they are' if len(done) != 1 else 'it is'} on the Applied tab.")
+    if other:
+        reasons = sorted({why(r) for r in other})
+        parts.append(f"{len(other)} couldn't be finished ({'; '.join(reasons)[:200]}). They stay on Ready to apply "
+                     "to do by hand.")
+    if stopped:
+        parts.append("You stopped the run.")
+    return (" ".join(parts) or "Nothing was submitted."), bool(done)
+
+
+AUTOAPPLY_CSS = """<style>
+.aa-jobs{display:flex;flex-direction:column}
+.aa-job{display:flex;gap:12px;align-items:center;padding:11px 0;border-top:1px solid var(--line)}
+.aa-job:first-child{border-top:0}
+.aa-job .score{width:36px;height:36px;font-size:16px;border-radius:9px}
+.aa-job .t{flex:1;min-width:0}
+.aa-job .t a{color:var(--text);text-decoration:none;font-weight:600}
+.aa-job .t a:hover{text-decoration:underline}
+.aa-job form{margin:0}
+.aa-btns{display:flex;gap:8px;flex:none}
+@media (max-width:560px){.aa-job{flex-wrap:wrap}.aa-btns{width:100%}.aa-btns form{flex:1}.aa-btns .btn{width:100%}}
+.aa-real{display:flex;gap:10px;align-items:center;flex-wrap:wrap}
+.aa-real input[type=number]{width:80px;padding:9px 10px;border-radius:10px;border:1px solid var(--line);
+  background:var(--field);color:var(--text);font:inherit}
+.aa-check{display:flex;gap:9px;align-items:flex-start;margin:12px 0;font-size:14.5px}
+.aa-check input{margin-top:4px}
+.btn.stop{background:#ef44441a;color:#f87171;border-color:#ef444455}
+.btn[disabled]{opacity:.45;cursor:not-allowed}
+</style>"""
+
+
 def autoapply_html(host: str) -> bytes:
-    c = job_counts() or {}
+    st = control.snapshot()
+    online, pending, running, last = st["online"], st.get("pending"), st.get("running"), st.get("last")
+    agent = st.get("agent") or {}
+    busy = bool(pending or running)
+    jobs, account_only = apply_candidates()
+    esc = html.escape
+
+    if running:
+        mode = "Practice run" if running["mode"] == "practice" else "Applying for real"
+        stopping = running.get("stop")
+        status = f"""<div class="card status"><span class="dot run"></span><div style="flex:1">
+<div class="head">{mode}{": " + esc(running.get("title") or "") if running.get("title") else ""}</div>
+<p>{esc(running.get("message") or "Working...")}</p>
+<p class="muted small">Started {_ago(running.get("started"))}. Chrome is open on your PC; don't use that window
+while it works.</p>
+{"" if stopping else '<form method="post" action="/autoapply/stop" style="margin-top:12px"><button class="btn stop sm">Stop</button></form>'}
+</div></div>"""
+    elif pending:
+        status = f"""<div class="card status"><span class="dot run"></span><div style="flex:1">
+<div class="head">Waiting for your PC to pick this up...</div>
+<p class="muted">{"It usually starts within a few seconds." if online else
+ "Your PC isn't connected right now, so this will start as soon as it is."}</p>
+<form method="post" action="/autoapply/stop" style="margin-top:12px"><button class="btn ghost sm">Cancel</button></form>
+</div></div>"""
+    elif online:
+        status = """<div class="card status"><span class="dot ok"></span><div>
+<div class="head">Your PC is connected and ready</div>
+<p class="muted">Pick a job below for a practice run, or let it apply for real.</p></div></div>"""
+    elif agent.get("last_seen"):
+        status = f"""<div class="card status"><span class="dot warn"></span><div>
+<div class="head">Your PC isn't connected</div>
+<p class="muted">Last seen {_ago(agent.get("last_seen"))}. The companion starts by itself when Windows starts.
+If the PC is on, open the Start menu, type <b>ApplyPilot Companion</b> and press Enter. This page updates when it
+connects.</p></div></div>"""
+    else:
+        status = """<div class="card status"><span class="dot"></span><div>
+<div class="head">Set up your PC once</div>
+<p class="muted">Follow the steps below. After that you control everything from this page.</p></div></div>"""
+
+    last_html = ""
+    if last and not busy:
+        dot = "ok" if last.get("ok") else "warn"
+        what = "Practice run" if last.get("mode") == "practice" else "Real run"
+        last_html = f"""<div class="card status"><span class="dot {dot}"></span><div>
+<div class="head">Last: {what}{": " + esc(last.get("title") or "") if last.get("title") else ""}</div>
+<p>{esc(last.get("summary") or "")}</p><p class="muted small">Finished {_ago(last.get("finished"))}.</p>
+</div></div>"""
+
+    ready = online and not busy
+    dis = "" if ready else " disabled"
+    controls = ""
+    if jobs:
+        rows = []
+        for j in jobs[:40]:
+            score = j["fit_score"] or 0
+            url = j["application_url"] or j["url"]
+            title = f'{j["title"]} at {j["site"]}' if j["site"] else j["title"]
+            hidden = (f'<input type="hidden" name="url" value="{esc(url, quote=True)}">'
+                      f'<input type="hidden" name="title" value="{esc(title, quote=True)}">')
+            rows.append(f"""<div class="aa-job"><span class="score{" mid" if score < 7 else ""}">{score}</span>
+<div class="t"><a href="{esc(j["url"] or url, quote=True)}" target="_blank" rel="noopener">{esc(j["title"])}</a>
+<div class="meta">{esc(j["site"] or "")}{" &middot; " + esc(j["location"]) if j["location"] else ""}</div></div>
+<div class="aa-btns"><form method="post" action="/autoapply/start">{hidden}<input type="hidden" name="mode"
+ value="practice"><button class="btn ghost sm"{dis}>Practice</button></form>
+<form method="post" action="/autoapply/start" onsubmit="return confirm('Submit an application to this job under your name?')">
+{hidden}<input type="hidden" name="mode" value="real"><input type="hidden" name="confirm" value="yes">
+<button class="btn primary sm"{dis}>Apply</button></form></div></div>""")
+        more = f'<p class="muted small" style="margin:10px 0 0">...and {len(jobs) - 40} more.</p>' if len(jobs) > 40 else ""
+        acct = (f'<p class="muted small" style="margin:10px 0 0">{account_only} more need an account on the company&rsquo;s '
+                f'site (Workday and similar), so they&rsquo;re left for you on <a href="/ready">Ready to apply</a>.</p>'
+                if account_only else "")
+        why_off = "" if ready else ('<p class="muted small" style="margin:0 0 10px">Buttons turn on when your PC is '
+                                    'connected and nothing else is running.</p>')
+        controls = f"""<div class="card">
+<h2>Apply to your best matches</h2>{why_off}
+<form method="post" action="/autoapply/start">
+<input type="hidden" name="mode" value="real">
+<div class="aa-real"><span>Apply to the next</span><input type="number" name="count" min="1" max="{len(jobs)}"
+ value="{min(3, len(jobs))}"><span>job(s), best match first</span></div>
+<label class="aa-check"><input type="checkbox" name="confirm" value="yes" required>
+<span>I understand these applications will be <b>submitted under my name</b>.</span></label>
+<button class="btn primary"{dis}>Start applying</button>
+<p class="muted small" style="margin:10px 0 0">Each one takes a few minutes. Every job it submits moves to the
+<a href="/applied">Applied</a> tab right away. Press Stop any time.</p>
+</form></div>
+<div class="card"><h2>Or pick a job</h2>
+<p class="muted small" style="margin:-4px 0 8px"><b>Practice</b> fills in the form on your PC and stops before
+submitting, so you can check it. <b>Apply</b> submits it.</p>
+<div class="aa-jobs">{"".join(rows)}</div>{more}{acct}</div>"""
+    else:
+        controls = """<div class="card empty"><div class="big">📭</div><h2>Nothing to auto-apply right now</h2>
+<p class="muted">New matches show up here after each search.</p></div>"""
+
+    setup_open = "" if agent.get("last_seen") else " open"
     body = f"""<h1>Auto-apply</h1>
-<p class="sub">Let Claude fill in and submit applications for you, from your own Windows PC.</p>
-<div class="card stack">
-<p style="margin:0">The companion downloads your <b>Ready to apply</b> jobs and their resumes, then uses Claude Code
-and Chrome on your PC to fill in each application. Jobs it submits are marked <b>Applied</b> here automatically,
-so nothing is sent twice.</p>
-<a class="btn primary" href="/companion.py" download="ApplyPilot-Companion.py">Download the companion</a>
-</div>
-<details class="card" open><summary><b>One-time setup (Windows)</b></summary>
+<p class="sub">Claude fills in applications for you in Chrome on your Windows PC. You start and watch it here.</p>
+<div class="stack">{status}{last_html}{controls}</div>
+<details class="card"{setup_open}><summary><b>Set up your PC (one time)</b></summary>
 <ol class="steps" style="margin-top:16px">
-<li><b>Download the companion</b> <span class="muted">with the button above. It saves as
-<code>ApplyPilot-Companion.py</code> in your Downloads folder.</span></li>
-<li><b>Open PowerShell</b> <span class="muted">(Start menu, type PowerShell) and run:<br>
+<li><b>Download the companion</b> <span class="muted">(skip this if you already have it):</span><br>
+<a class="btn ghost sm" style="margin-top:8px" href="/companion.py" download="ApplyPilot-Companion.py">Download the
+companion</a></li>
+<li><b>Run it one last time from PowerShell</b> <span class="muted">(Start menu, type PowerShell):<br>
 <code>cd ~\\Downloads</code><br><code>python ApplyPilot-Companion.py</code></span></li>
-<li><b>Enter your site password</b> <span class="muted">when asked. It's remembered after the first time. The
-first run also installs ApplyPilot, which takes a few minutes.</span></li>
-<li><b>Start with a practice run.</b> <span class="muted">Chrome opens and Claude fills in your best match but
-<b>doesn't submit</b>. Watch it and check the answers.</span></li>
-<li><b>Then let it apply.</b> <span class="muted">Choose how many jobs. Each takes a few minutes; keep the PC awake
-and don't use that Chrome window while it works.</span></li>
+<li><b>Type Y</b> <span class="muted">when it asks <i>&ldquo;Let the website control auto-apply?&rdquo;</i>. A
+small minimized <b>ApplyPilot Companion</b> window appears on the taskbar. That&rsquo;s it running; leave it open.</span></li>
+<li><b>Come back here.</b> <span class="muted">Within a few seconds this page says your PC is connected. From now
+on it starts by itself whenever Windows starts, and you never need PowerShell again.</span></li>
 </ol></details>
 <details class="card"><summary><b>Good to know</b></summary>
 <ul class="muted small" style="margin:12px 0 0;padding-left:20px">
-<li>It submits under your name using your Setup details (salary, start date, work authorization), so keep them
+<li>It answers with your Setup details (salary, start date, work authorization, voluntary questions), so keep them
 current.</li>
-<li>Sites that need an account login or a CAPTCHA often can't be finished; those are noted on the job card for
-you to apply by hand.</li>
-<li>It uses your Claude subscription through Claude Code; each application is several minutes of Claude's work.</li>
-<li>Run the companion again any time to pick up new matches. {c.get('tailored', 0)} jobs have resumes ready now.</li>
+<li>Sites that need an account, a CAPTCHA, or an emailed code are left for you to finish by hand; the job card on
+Ready to apply says why.</li>
+<li>It uses your Claude subscription through Claude Code; each application is a few minutes of Claude&rsquo;s work.</li>
+<li>Keep the PC awake while it runs, and don&rsquo;t use the Chrome window it opens.</li>
 </ul></details>"""
-    return page("Auto-apply", body, "auto")
+    head = AUTOAPPLY_CSS
+    if busy or not online:
+        head += '<meta http-equiv="refresh" content="5">' if busy else '<meta http-equiv="refresh" content="15">'
+    return page("Auto-apply", body, "auto", head)
 
 
 def listing_html(rel: str, directory: Path) -> bytes:
@@ -874,10 +1034,15 @@ class Handler(BaseHTTPRequestHandler):
 
     def do_POST(self):
         path = urlparse(self.path).path
-        if path not in ("/run", "/setup", "/edit", "/mark", "/api/results", "/api/log"):
+        if path not in ("/run", "/setup", "/edit", "/mark", "/api/results", "/api/log", "/autoapply/start",
+                        "/autoapply/stop", "/api/agent/poll", "/api/agent/status", "/api/agent/done"):
             return self._send(404, b"Not found", "text/plain")
         if not self._authorized():
             return
+        if path.startswith("/autoapply/"):
+            return self._post_autoapply(path)
+        if path.startswith("/api/agent/"):
+            return self._post_agent(path)
         if path == "/setup":
             return self._post_setup()
         if path == "/edit":
@@ -914,6 +1079,63 @@ class Handler(BaseHTTPRequestHandler):
             threading.Thread(target=run_pipeline, daemon=True).start()
             msg = "Pipeline started."
         self._send(303, msg.encode(), "text/plain", {"Location": "/status"})
+
+    def _read_json(self) -> dict:
+        length = int(self.headers.get("Content-Length") or 0)
+        try:
+            data = json.loads(self.rfile.read(min(length, 2 * 1024 * 1024)) or b"{}")
+        except ValueError:
+            return {}
+        return data if isinstance(data, dict) else {}
+
+    def _post_autoapply(self, path: str):
+        length = int(self.headers.get("Content-Length") or 0)
+        form = parse_qs(self.rfile.read(min(length, 65536)).decode("utf-8", errors="replace"))
+        if path == "/autoapply/stop":
+            control.stop()
+            log("Auto-apply: stop requested from the website")
+        else:
+            mode = form.get("mode", ["practice"])[0]
+            url = form.get("url", [""])[0].strip() or None
+            title = form.get("title", [""])[0].strip()
+            try:
+                count = int(form.get("count", ["1"])[0])
+            except ValueError:
+                count = 1
+            if mode == "real" and form.get("confirm", [""])[0] != "yes":
+                pass  # real runs need the "submitted under my name" confirmation
+            elif mode == "practice" and not url:
+                pass
+            else:
+                if url:
+                    count = 1
+                elif not title:
+                    title = f"next {count} job{'s' if count != 1 else ''}"
+                error = control.queue("real" if mode == "real" else "practice", url, count, title)
+                log(f"Auto-apply: {error or f'queued {mode} run for {title}'}")
+        return self._send(303, b"", "text/plain", {"Location": "/autoapply"})
+
+    def _post_agent(self, path: str):
+        data = self._read_json()
+        if path == "/api/agent/poll":
+            reply = control.poll(str(data.get("version", "")), bool(data.get("busy")))
+            if reply.get("command"):
+                log(f"Auto-apply: PC picked up {reply['command']['mode']} run")
+        elif path == "/api/agent/status":
+            control.status(str(data.get("message", "")))
+            reply = {"ok": True}
+        else:
+            results = data.get("results") if isinstance(data.get("results"), list) else []
+            mode = "real" if data.get("mode") == "real" else "practice"
+            # A practice "applied" means the form was filled in, not submitted: only record what went wrong.
+            record_results(results if mode == "real" else [r for r in results if r.get("status") != "applied"])
+            summary, ok = run_summary(mode, results, bool(data.get("stopped")))
+            if data.get("error"):
+                summary, ok = str(data["error"])[:300], False
+            control.finish(str(data.get("id", "")), summary, ok)
+            log(f"Auto-apply finished: {summary}")
+            reply = {"ok": True, "summary": summary}
+        return self._send(200, json.dumps(reply).encode(), "application/json")
 
     def _post_edit(self):
         length = int(self.headers.get("Content-Length") or 0)
