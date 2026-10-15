@@ -383,6 +383,7 @@ def write_config(data_dir: Path, f: dict[str, str]) -> None:
             "preserved_school": f.get("school", ""),
             "real_metrics": _lines(f.get("metrics", "")),
         },
+        "preferences": {"ai_only": bool(f.get("ai_only"))},
         "eeo_voluntary": {
             "gender": f.get("eeo_gender") or DECLINE,
             "race_ethnicity": f.get("eeo_race") or DECLINE,
@@ -559,6 +560,7 @@ document.querySelectorAll('.pk').forEach(function(d){{d.style.display=d.dataset.
        placeholder="AI Solutions Architect")}
 {check("want_remote", "Remote jobs", True)}
 {check("want_local", "Jobs near my city", True)}
+{check("ai_only", "Only AI-focused roles (jobs where AI is a real part of the work, not just a mention)", False)}
 <div class="row"><div>{select("days_back", "Look at jobs posted in the last",
     [("3", "3 days"), ("7", "week"), ("14", "2 weeks")], "7")}</div>
 <div>{select("min_score", "Write resumes for jobs scoring",

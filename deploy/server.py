@@ -149,20 +149,23 @@ def requeue_failed_scores() -> None:
         # ...or the resume changed since then: every score is relative to the resume.
         import hashlib
 
-        from applypilot.scoring.scorer import SCORE_PROMPT_VERSION
+        from applypilot.scoring.scorer import SCORE_PROMPT_VERSION, ai_only
         resume = DATA_DIR / "resume.txt"
         resume_hash = hashlib.sha256(resume.read_bytes()).hexdigest()[:16] if resume.exists() else ""
-        version = f"{SCORE_PROMPT_VERSION}:{resume_hash}"
+        base = f"{SCORE_PROMPT_VERSION}:{resume_hash}"
+        version = base + (":ai" if ai_only() else "")
         marker = DATA_DIR / ".score_prompt_version"
         old_version = marker.read_text().strip() if marker.exists() else ""
         # Old markers held only the prompt version; treat a matching one as current for this resume.
         if old_version == str(SCORE_PROMPT_VERSION):
             marker.write_text(version)
         elif old_version != version:
+            # Re-score everything not yet applied to, including jobs with resumes ready: a job that
+            # now scores below the bar drops off Ready to apply (its resume is kept on disk).
             m = conn.execute("UPDATE jobs SET fit_score = NULL, scored_at = NULL "
-                             "WHERE fit_score IS NOT NULL AND tailored_resume_path IS NULL").rowcount
+                             "WHERE fit_score IS NOT NULL AND applied_at IS NULL").rowcount
             marker.write_text(version)
-            log(f"Resume or scoring instructions changed; re-scoring {m} job(s)")
+            log(f"Resume or scoring preferences changed; re-scoring {m} job(s)")
         # One-time: tailoring attempts that failed because replies were cut off (output limit,
         # then OpenRouter's default reasoning) shouldn't count toward the 5-attempt cap.
         reset_marker = DATA_DIR / ".tailor_attempts_reset_v1"
@@ -181,12 +184,42 @@ def requeue_failed_scores() -> None:
                 "WHERE tailored_resume_path IS NOT NULL OR cover_letter_path IS NOT NULL").rowcount
             retailor_marker.write_text("1")
             log(f"Rewriting resumes and cover letters for {r} job(s)")
+        # One-time: rewrite resumes and cover letters not yet used, so they draw on the updated
+        # master resume. Ones the person edited by hand are kept.
+        refresh_marker = DATA_DIR / ".refresh_v3"
+        if not refresh_marker.exists():
+            r = 0
+            for url, path, when in conn.execute(
+                    "SELECT url, tailored_resume_path, tailored_at FROM jobs "
+                    "WHERE tailored_resume_path IS NOT NULL AND applied_at IS NULL").fetchall():
+                if _edited_by_hand(path, when):
+                    continue
+                conn.execute("UPDATE jobs SET tailored_resume_path = NULL, tailored_at = NULL, tailor_attempts = 0, "
+                             "cover_letter_path = NULL, cover_letter_at = NULL, cover_attempts = 0 WHERE url = ?",
+                             (url,))
+                r += 1
+            refresh_marker.write_text("1")
+            log(f"Rewriting {r} resume(s) and cover letter(s) from the updated master resume")
         conn.commit()
         conn.close()
         if n:
             log(f"Re-queued {n} job(s) whose scoring failed")
     except sqlite3.Error as e:
         log(f"Could not re-queue failed scores: {e}")
+
+
+def _edited_by_hand(path: str | None, tailored_at: str | None) -> bool:
+    """Whether a tailored resume was changed in the editor after it was written."""
+    if not path:
+        return False
+    txt = Path(path).with_suffix(".txt")
+    if editor.was_edited(txt):
+        return True
+    try:  # edits from before the editor recorded them: the file changed well after it was written
+        written = datetime.fromisoformat(tailored_at).timestamp() if tailored_at else None
+        return bool(written) and txt.exists() and txt.stat().st_mtime - written > 120
+    except (ValueError, OSError):
+        return False
 
 
 def run_pipeline(wait: bool = False) -> None:
@@ -521,7 +554,8 @@ def _tailored_jobs() -> list:
             jobs = conn.execute(
                 "SELECT title, site, company, location, url, application_url, fit_score, tailored_resume_path, "
                 "cover_letter_path, applied_at, apply_status, apply_error FROM jobs WHERE tailored_resume_path IS NOT NULL "
-                "ORDER BY fit_score DESC, tailored_at DESC").fetchall()
+                "AND (applied_at IS NOT NULL OR fit_score IS NULL OR fit_score >= ?) "
+                "ORDER BY fit_score DESC, tailored_at DESC", (int(setup_form.saved_min_score(DATA_DIR)),)).fetchall()
             conn.close()
         except sqlite3.Error as e:
             log(f"Ready page query failed: {e}")
@@ -633,6 +667,7 @@ def apply_candidates() -> tuple[list, int]:
         "SELECT url, title, site, company, location, application_url, fit_score, full_description, "
         "tailored_resume_path, cover_letter_path, COALESCE(apply_attempts, 0) AS apply_attempts "
         "FROM jobs WHERE tailored_resume_path IS NOT NULL AND applied_at IS NULL "
+        f"AND (fit_score IS NULL OR fit_score >= {int(setup_form.saved_min_score(DATA_DIR))}) "
         "AND COALESCE(apply_status, '') NOT IN ('manual', 'expired') "
         f"AND COALESCE(apply_error, '') NOT IN ({', '.join(repr(r) for r in HAND_ONLY_REASONS)}) "
         "ORDER BY fit_score DESC").fetchall()

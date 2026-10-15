@@ -60,9 +60,27 @@ def mark_checked(doc: Path) -> None:
         path.write_text(json.dumps(data, indent=2), encoding="utf-8")
 
 
+def was_edited(doc: Path) -> bool:
+    """Whether the person changed this document in the editor."""
+    try:
+        return bool(json.loads(report_path(doc).read_text(encoding="utf-8")).get("edited_by_user"))
+    except (OSError, ValueError):
+        return False
+
+
 def save(doc: Path, text: str) -> str | None:
     """Write the edited text and rebuild its PDF. Returns an error message if the PDF failed."""
     doc.write_text(text.replace("\r\n", "\n").strip() + "\n", encoding="utf-8")
+    path = report_path(doc)
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        data = {}
+    data["edited_by_user"] = True
+    try:
+        path.write_text(json.dumps(data, indent=2), encoding="utf-8")
+    except OSError:
+        pass
     try:
         from applypilot.scoring.pdf import convert_to_pdf
         convert_to_pdf(doc)

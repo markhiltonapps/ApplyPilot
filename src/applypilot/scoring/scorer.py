@@ -11,6 +11,7 @@ import re
 import time
 from datetime import datetime, timezone
 
+from applypilot.company import company_for
 from applypilot.config import RESUME_PATH, load_profile
 from applypilot.database import get_connection, get_jobs_by_stage
 from applypilot.llm import get_client
@@ -108,7 +109,19 @@ def _targets_line() -> str:
                     + ". A job close to these and to their background should score higher than one "
                     "that only overlaps on skills." if roles else
                     "Consider whether the job matches the direction of the candidate's career.")
+        if ai_only():
+            _TARGETS += ("\n- The candidate ONLY wants roles where AI (machine learning, generative AI, LLMs, AI agents "
+                         "or AI products) is central to the day-to-day work. If AI appears only in the company "
+                         "description or is a minor part of the job, score 4 or lower however well the rest fits.")
     return _TARGETS
+
+
+def ai_only() -> bool:
+    """Whether the candidate asked (in Setup) for AI-focused roles only."""
+    try:
+        return bool(load_profile().get("preferences", {}).get("ai_only"))
+    except (FileNotFoundError, ValueError):
+        return False
 
 
 def score_job(resume_text: str, job: dict) -> dict:
@@ -123,7 +136,7 @@ def score_job(resume_text: str, job: dict) -> dict:
     """
     job_text = (
         f"TITLE: {job['title']}\n"
-        f"COMPANY: {job['site']}\n"
+        f"COMPANY: {company_for(job.get('company'), job.get('site'), job.get('application_url')) or job['site']}\n"
         f"LOCATION: {job.get('location', 'N/A')}\n\n"
         f"DESCRIPTION:\n{(job.get('full_description') or '')[:6000]}"
     )
