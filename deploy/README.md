@@ -30,7 +30,7 @@ These are optional if you use the setup page. When set, `APPLYPILOT_PROFILE_JSON
 | `DASHBOARD_USER` | no | Basic-auth user name (default `applypilot`) |
 | `RUN_INTERVAL_HOURS` | no | Hours between runs (default `12`; `0` = only on start or on demand) |
 | `RUN_ON_START` | no | Run immediately on boot (default `true`) |
-| `RUN_ARGS` | no | Extra `applypilot run` arguments (default `--validation normal`), e.g. `--workers 2 --min-score 8` |
+| `RUN_ARGS` | no | Extra `applypilot run` arguments (default `--validation normal --stream --workers 2`, so scoring starts while discovery is still running), e.g. `--workers 2 --min-score 8` |
 | `LLM_MODEL`, `PROXY`, `CAPSOLVER_API_KEY` | no | Same meaning as in the CLI |
 
 The server rewrites the profile, resume and searches files from these variables on every start and before every run, so changing a variable updates the config.

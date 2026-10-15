@@ -44,7 +44,7 @@ PASSWORD = os.environ.get("DASHBOARD_PASSWORD", "")
 USER = os.environ.get("DASHBOARD_USER", "applypilot")
 INTERVAL_HOURS = float(os.environ.get("RUN_INTERVAL_HOURS", "12"))
 RUN_ON_START = os.environ.get("RUN_ON_START", "true").lower() in ("1", "true", "yes")
-RUN_ARGS = shlex.split(os.environ.get("RUN_ARGS", "--validation normal"))
+RUN_ARGS = shlex.split(os.environ.get("RUN_ARGS", "--validation normal --stream --workers 2"))
 
 # Output folders that may be browsed and downloaded from the dashboard.
 SERVED_DIRS = ("tailored_resumes", "cover_letters")
@@ -300,6 +300,18 @@ it does nothing while a search is already running.</p>
     return page("ApplyPilot status", body)
 
 
+NAV_HTML = """<nav style="display:flex;gap:18px;flex-wrap:wrap;align-items:center;padding:10px 0 18px;
+font-size:15px"><a href="/status" style="color:#60a5fa">← Status &amp; how-to</a>
+<a href="/setup" style="color:#60a5fa">Edit setup</a>
+<a href="/files/tailored_resumes/" style="color:#60a5fa">All tailored resumes</a>
+<a href="/files/cover_letters/" style="color:#60a5fa">All cover letters</a></nav>"""
+
+
+def add_nav(dashboard_html: str) -> str:
+    """Put links back to the rest of the site at the top of the generated dashboard."""
+    return dashboard_html.replace("<body>", "<body>" + NAV_HTML, 1)
+
+
 def listing_html(rel: str, directory: Path) -> bytes:
     items = sorted(directory.iterdir(), key=lambda p: p.stat().st_mtime, reverse=True)
     rows = "".join(
@@ -363,7 +375,7 @@ class Handler(BaseHTTPRequestHandler):
                 except Exception as e:  # noqa: BLE001 - fall back to the last generated dashboard
                     log(f"Dashboard refresh failed: {e}")
             if dash.exists():
-                return self._send(200, dash.read_bytes())
+                return self._send(200, add_nav(dash.read_text(encoding="utf-8")).encode())
             return self._send(200, status_html())
         if path == "/status":
             return self._send(200, status_html())
