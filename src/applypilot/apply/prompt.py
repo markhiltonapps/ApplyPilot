@@ -86,6 +86,7 @@ def _build_profile_summary(profile: dict) -> str:
     # EEO
     lines.append(f"Gender: {eeo.get('gender', 'Decline to self-identify')}")
     lines.append(f"Race: {eeo.get('race_ethnicity', 'Decline to self-identify')}")
+    lines.append(f"Hispanic/Latino: {eeo.get('hispanic_latino', 'Decline to self-identify')}")
     lines.append(f"Veteran: {eeo.get('veteran_status', 'I am not a protected veteran')}")
     lines.append(f"Disability: {eeo.get('disability_status', 'I do not wish to answer')}")
 
@@ -182,7 +183,9 @@ Skills and tools -> be confident. This candidate is a {target_role} with {years}
 
 Open-ended questions ("Why do you want this role?", "Tell us about yourself", "What interests you?") -> Write 2-3 sentences. Be specific to THIS job. Reference something from the job description. Connect it to a real achievement from the resume. No generic fluff. No "I am passionate about..." -- sound like a real person.
 
-EEO/demographics -> "Decline to self-identify" or "Prefer not to say" for everything."""
+EEO/demographics (gender, race, Hispanic/Latino, veteran, disability) -> use the answers in the APPLICANT PROFILE,
+picking the form option that matches. If the profile answer is a decline, or a question isn't covered there (e.g.
+sexual orientation), choose "Decline to self-identify" / "Prefer not to say"."""
 
 
 def _build_hard_rules(profile: dict) -> str:

@@ -168,6 +168,18 @@ def has_llm_key(data_dir: Path, environ: dict) -> bool:
     return any(environ.get(k) for k in keys) or any(k in _env_values(data_dir) for k in keys)
 
 
+DECLINE = "Decline to self-identify"
+EEO_OPTIONS = {
+    "eeo_gender": ("Gender", ["Male", "Female", "Non-binary"]),
+    "eeo_race": ("Race", ["White", "Black or African American", "Asian", "American Indian or Alaska Native",
+                          "Native Hawaiian or Other Pacific Islander", "Two or more races"]),
+    "eeo_hispanic": ("Hispanic or Latino?", ["No", "Yes"]),
+    "eeo_veteran": ("Veteran status", ["I am not a protected veteran",
+                                       "I identify as one or more of the classifications of protected veteran"]),
+    "eeo_disability": ("Disability", ["No, I do not have a disability", "Yes, I have a disability"]),
+}
+
+
 def _saved_form(data_dir: Path) -> dict[str, str]:
     path = data_dir / "setup_form.json"
     if path.exists():
@@ -372,10 +384,11 @@ def write_config(data_dir: Path, f: dict[str, str]) -> None:
             "real_metrics": _lines(f.get("metrics", "")),
         },
         "eeo_voluntary": {
-            "gender": "Decline to self-identify",
-            "race_ethnicity": "Decline to self-identify",
-            "veteran_status": "Decline to self-identify",
-            "disability_status": "Decline to self-identify",
+            "gender": f.get("eeo_gender") or DECLINE,
+            "race_ethnicity": f.get("eeo_race") or DECLINE,
+            "hispanic_latino": f.get("eeo_hispanic") or DECLINE,
+            "veteran_status": f.get("eeo_veteran") or DECLINE,
+            "disability_status": f.get("eeo_disability") or DECLINE,
         },
     }
     (data_dir / "profile.json").write_text(json.dumps(profile, indent=2, ensure_ascii=False), encoding="utf-8")
@@ -567,6 +580,13 @@ document.querySelectorAll('.pk').forEach(function(d){{d.style.display=d.dataset.
 {area("skills", "Your skills", "Comma-separated. The AI won't claim skills outside this list.")}
 {area("companies", "Companies you've worked for", "Comma-separated. These always stay on your resume.")}
 {area("metrics", "Real results to keep", "Comma-separated, e.g. grew revenue 40%, managed $2M budget")}
+</fieldset>
+
+<fieldset><legend>6. Voluntary questions</legend>
+<p class="hint" style="margin-top:0">Many applications ask these optional equal-opportunity questions. Auto-apply
+answers them with what you choose here; "{DECLINE}" means it picks the decline option.</p>
+{"".join(select(name, label, [(o, o) for o in opts] + [(DECLINE, DECLINE)], DECLINE)
+         for name, (label, opts) in EEO_OPTIONS.items())}
 </fieldset>
 
 <button type="submit">Save and start searching</button>
