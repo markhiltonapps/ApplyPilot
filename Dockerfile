@@ -22,7 +22,7 @@ RUN pip install . \
 
 COPY deploy/server.py ./deploy/server.py
 
-VOLUME ["/data"]
+# Data lives in $APPLYPILOT_DIR (/data); mount a persistent volume there.
 EXPOSE 8080
 
 CMD ["python", "/app/deploy/server.py"]
