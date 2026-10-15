@@ -432,6 +432,59 @@ def edit_html(doc: Path, rel: str, message: str = "") -> bytes:
     return page(f"Edit {kind}", editor.page_body(doc, rel, title, kind, message), "ready")
 
 
+def _dup_key(title: str | None, site: str | None) -> str:
+    """Same title at the same source is treated as the same job posted twice."""
+    return f"{(title or '').strip().lower()}|{(site or '').strip().lower()}"
+
+
+def _job_card(j, applied_keys: set[str]) -> str:
+    score = j["fit_score"] or 0
+    apply_url = j["application_url"] or j["url"] or ""
+    meta = " &middot; ".join(html.escape(x) for x in (j["site"], j["location"]) if x)
+    applied = bool(j["applied_at"])
+    url_q = html.escape(j["url"], quote=True)
+    actions = []
+    if href := _doc_href(j["tailored_resume_path"]):
+        actions.append(f'<a class="btn good sm" href="{html.escape(href)}" target="_blank">Resume</a>')
+    if href := _doc_href(j["cover_letter_path"]):
+        actions.append(f'<a class="btn ghost sm" href="{html.escape(href)}" target="_blank">Cover letter</a>')
+    if apply_url and not applied:
+        actions.append(f'<a class="btn primary sm" href="{html.escape(apply_url)}" target="_blank" '
+                       f'rel="noopener">Apply &rarr;</a>')
+    note = "" if applied else _review_note(j["tailored_resume_path"])
+    resume_rel = html.escape(_rel(j["tailored_resume_path"]), quote=True)
+    cover_rel = html.escape(_rel(j["cover_letter_path"]), quote=True)
+    review = (f'<details class="review"><summary>⚠ Check this resume before sending</summary>'
+              f'<p>{html.escape(note).replace(chr(10), "<br>")}</p>'
+              f'<a class="btn primary sm" href="/edit?f={resume_rel}">Fix it in the editor</a></details>'
+              if note else "")
+    dup = ""
+    if not applied and _dup_key(j["title"], j["site"]) in applied_keys:
+        dup = ('<div class="review" style="margin:0"><b style="color:var(--warn)">You already applied to a job '
+               'with this title here.</b> It\'s probably the same posting listed twice.</div>')
+    edits = [f'<a href="/edit?f={resume_rel}">Edit resume</a>'] if resume_rel and not applied else []
+    if cover_rel and not applied:
+        edits.append(f'<a href="/edit?f={cover_rel}">Edit cover letter</a>')
+    if resume_rel:
+        edits.append(f'<a href="/docx?f={resume_rel}">Resume as Word</a>')
+    edit_links = f'<div class="muted small">{" &middot; ".join(edits)}</div>' if edits else ""
+    if applied:
+        when = (j["applied_at"] or "")[:10]
+        how = " by auto-apply" if (j["apply_status"] or "") == "applied_auto" else ""
+        mark = (f'<form method="post" action="/mark" class="mark"><input type="hidden" name="url" value="{url_q}">'
+                f'<span class="applied-tag">✓ Applied {html.escape(when)}{how}</span>'
+                f'<button class="linkbtn" name="action" value="undo">Undo</button></form>')
+    else:
+        mark = (f'<form method="post" action="/mark" class="mark"><input type="hidden" name="url" value="{url_q}">'
+                f'<button class="btn ghost sm check" name="action" value="applied">☐ I applied to this job</button>'
+                f'</form>')
+    return f"""<div class="card job{' done' if applied else ''}"><div class="job-top">
+<div class="score{'' if score >= 7 else ' mid'}">{score}</div><div>
+<a class="job-title" href="{html.escape(j['url'] or apply_url)}" target="_blank" rel="noopener">
+{html.escape(j['title'] or 'Untitled')}</a><div class="meta">{meta}</div></div></div>
+{dup}{review}<div class="row" style="gap:8px">{''.join(actions)}</div>{mark}{edit_links}</div>"""
+
+
 def ready_html() -> bytes:
     import sqlite3
     db = DATA_DIR / "applypilot.db"
@@ -442,7 +495,7 @@ def ready_html() -> bytes:
             conn.row_factory = sqlite3.Row
             jobs = conn.execute(
                 "SELECT title, site, location, url, application_url, fit_score, tailored_resume_path, "
-                "cover_letter_path FROM jobs WHERE tailored_resume_path IS NOT NULL "
+                "cover_letter_path, applied_at, apply_status FROM jobs WHERE tailored_resume_path IS NOT NULL "
                 "ORDER BY fit_score DESC, tailored_at DESC").fetchall()
             conn.close()
         except sqlite3.Error as e:
@@ -457,42 +510,41 @@ def ready_html() -> bytes:
 <p class="muted">{note}</p><a class="btn ghost" href="/status">Check progress</a></div>"""
         return page("Ready to apply", body, "ready")
 
-    cards = []
-    for j in jobs:
-        score = j["fit_score"] or 0
-        apply_url = j["application_url"] or j["url"] or ""
-        meta = " &middot; ".join(html.escape(x) for x in (j["site"], j["location"]) if x)
-        actions = []
-        if href := _doc_href(j["tailored_resume_path"]):
-            actions.append(f'<a class="btn good sm" href="{html.escape(href)}" target="_blank">Resume</a>')
-        if href := _doc_href(j["cover_letter_path"]):
-            actions.append(f'<a class="btn ghost sm" href="{html.escape(href)}" target="_blank">Cover letter</a>')
-        if apply_url:
-            actions.append(f'<a class="btn primary sm" href="{html.escape(apply_url)}" target="_blank" '
-                           f'rel="noopener">Apply &rarr;</a>')
-        note = _review_note(j["tailored_resume_path"])
-        resume_rel = html.escape(_rel(j["tailored_resume_path"]), quote=True)
-        cover_rel = html.escape(_rel(j["cover_letter_path"]), quote=True)
-        review = (f'<details class="review"><summary>⚠ Check this resume before sending</summary>'
-                  f'<p>{html.escape(note).replace(chr(10), "<br>")}</p>'
-                  f'<a class="btn primary sm" href="/edit?f={resume_rel}">Fix it in the editor</a></details>'
-                  if note else "")
-        edits = [f'<a href="/edit?f={resume_rel}">Edit resume</a>'] if resume_rel else []
-        if cover_rel:
-            edits.append(f'<a href="/edit?f={cover_rel}">Edit cover letter</a>')
-        if resume_rel:
-            edits.append(f'<a href="/docx?f={resume_rel}">Resume as Word</a>')
-        edit_links = f'<div class="muted small">{" &middot; ".join(edits)}</div>' if edits else ""
-        cards.append(f"""<div class="card job"><div class="job-top">
-<div class="score{'' if score >= 7 else ' mid'}">{score}</div><div>
-<a class="job-title" href="{html.escape(j['url'] or apply_url)}" target="_blank" rel="noopener">
-{html.escape(j['title'] or 'Untitled')}</a><div class="meta">{meta}</div></div></div>
-{review}<div class="row" style="gap:8px">{''.join(actions)}</div>{edit_links}</div>""")
+    todo = [j for j in jobs if not j["applied_at"]]
+    done = sorted((j for j in jobs if j["applied_at"]), key=lambda j: j["applied_at"], reverse=True)
+    applied_keys = {_dup_key(j["title"], j["site"]) for j in done}
+    todo_html = "".join(_job_card(j, applied_keys) for j in todo) or (
+        '<div class="card empty"><div class="big">🎉</div><h2>All caught up</h2>'
+        '<p class="muted">New matches appear here after each search.</p></div>')
+    done_html = ""
+    if done:
+        done_html = (f'<details class="card" style="margin-top:22px"><summary><b>Applied ({len(done)})</b>'
+                     f'</summary><div class="stack" style="margin-top:14px">'
+                     f'{"".join(_job_card(j, applied_keys) for j in done)}</div></details>')
     body = f"""<h1>Ready to apply</h1>
-<p class="sub">{len(jobs)} job{'s' if len(jobs) != 1 else ''} with a tailored resume, best match first. Download the
-resume, then tap Apply.</p>
-<div class="stack">{''.join(cards)}</div>"""
+<p class="sub">{len(todo)} to apply, best match first{f", {len(done)} applied" if done else ""}. Download the resume,
+apply, then tick <b>I applied</b> so you never apply twice.</p>
+<div class="stack">{todo_html}</div>{done_html}"""
     return page("Ready to apply", body, "ready")
+
+
+def mark_applied(url: str, applied: bool, status: str = "applied", when: str | None = None) -> bool:
+    """Record (or undo) an application for a job. Returns whether a job was updated."""
+    import sqlite3
+    try:
+        conn = sqlite3.connect(DATA_DIR / "applypilot.db", timeout=10)
+        if applied:
+            n = conn.execute("UPDATE jobs SET applied_at = ?, apply_status = ?, apply_error = NULL WHERE url = ?",
+                             (when or now_iso(), status, url)).rowcount
+        else:
+            n = conn.execute("UPDATE jobs SET applied_at = NULL, apply_status = NULL WHERE url = ?",
+                             (url,)).rowcount
+        conn.commit()
+        conn.close()
+        return n > 0
+    except sqlite3.Error as e:
+        log(f"Could not update applied state: {e}")
+        return False
 
 
 def listing_html(rel: str, directory: Path) -> bytes:
@@ -606,7 +658,7 @@ class Handler(BaseHTTPRequestHandler):
 
     def do_POST(self):
         path = urlparse(self.path).path
-        if path not in ("/run", "/setup", "/edit"):
+        if path not in ("/run", "/setup", "/edit", "/mark"):
             return self._send(404, b"Not found", "text/plain")
         if not self._authorized():
             return
@@ -614,6 +666,12 @@ class Handler(BaseHTTPRequestHandler):
             return self._post_setup()
         if path == "/edit":
             return self._post_edit()
+        if path == "/mark":
+            length = int(self.headers.get("Content-Length") or 0)
+            form = parse_qs(self.rfile.read(min(length, 65536)).decode("utf-8", errors="replace"))
+            url = form.get("url", [""])[0]
+            mark_applied(url, form.get("action", ["applied"])[0] == "applied")
+            return self._send(303, b"", "text/plain", {"Location": "/ready"})
         if _run_lock.locked():
             msg = "Pipeline is already running."
         else:

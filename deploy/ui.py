@@ -102,6 +102,10 @@ details[open]>summary::before{transform:rotate(90deg)}
 .review{background:#f59e0b14;border:1px solid #f59e0b55;border-radius:10px;padding:9px 12px;font-size:14px}
 .review summary{color:var(--warn);font-weight:600}
 .review p{margin:8px 0 2px;color:var(--text)}
+.mark{margin:0}.mark .check{width:100%}
+.applied-tag{color:var(--good);font-weight:600;font-size:14px;margin-right:10px}
+.linkbtn{background:none;border:0;color:var(--accent);cursor:pointer;font:inherit;font-size:14px;padding:0;text-decoration:underline}
+.job.done{opacity:.8}
 .empty{text-align:center;padding:38px 20px}
 .empty .big{font-size:40px;line-height:1;margin-bottom:10px}
 .files a{display:flex;justify-content:space-between;gap:12px;padding:12px 2px;border-bottom:1px solid var(--line);
