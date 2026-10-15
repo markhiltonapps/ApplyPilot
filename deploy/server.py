@@ -37,6 +37,7 @@ from pathlib import Path
 from urllib.parse import unquote, urlparse
 
 import setup_form
+import ui
 
 DATA_DIR = Path(os.environ.setdefault("APPLYPILOT_DIR", "/data"))
 PORT = int(os.environ.get("PORT", "8080"))
@@ -52,6 +53,7 @@ SERVED_DIRS = ("tailored_resumes", "cover_letters")
 _state_lock = threading.Lock()
 _run_lock = threading.Lock()
 _wake = threading.Event()
+_proc: subprocess.Popen | None = None  # the running `applypilot run`, if any
 state: dict = {
     "running": False,
     "last_started": None,
@@ -124,8 +126,30 @@ def generate_dashboard() -> None:
     )
 
 
-def run_pipeline() -> None:
-    if not _run_lock.acquire(blocking=False):
+def requeue_failed_scores() -> None:
+    """Send jobs whose scoring failed back for scoring.
+
+    Real scores are 1-10; the scorer stores 0 when the model's answer couldn't be
+    read (overloaded model, empty answer), and those jobs are otherwise never retried.
+    """
+    import sqlite3
+    db = DATA_DIR / "applypilot.db"
+    if not db.exists():
+        return
+    try:
+        conn = sqlite3.connect(db, timeout=10)
+        n = conn.execute("UPDATE jobs SET fit_score = NULL, scored_at = NULL WHERE fit_score = 0").rowcount
+        conn.commit()
+        conn.close()
+        if n:
+            log(f"Re-queued {n} job(s) whose scoring failed")
+    except sqlite3.Error as e:
+        log(f"Could not re-queue failed scores: {e}")
+
+
+def run_pipeline(wait: bool = False) -> None:
+    global _proc
+    if not _run_lock.acquire(blocking=wait, timeout=120 if wait else -1):
         log("Pipeline already running; skipping.")
         return
     try:
@@ -137,12 +161,14 @@ def run_pipeline() -> None:
                 log(f"Not running pipeline: {p}")
             return
 
+        requeue_failed_scores()
         cmd = [sys.executable, "-m", "applypilot", "run", *RUN_ARGS]
         log(f"Starting pipeline: {shlex.join(cmd)}")
         with _state_lock:
             state["running"] = True
             state["last_started"] = now_iso()
-        code = subprocess.run(cmd, check=False).returncode
+        _proc = subprocess.Popen(cmd)
+        code = _proc.wait()
         log(f"Pipeline finished with exit code {code}")
         generate_dashboard()
         with _state_lock:
@@ -153,6 +179,19 @@ def run_pipeline() -> None:
         with _state_lock:
             state["running"] = False
         _run_lock.release()
+
+
+def restart_pipeline() -> None:
+    """Stop the search in progress (if any) and start a fresh one with the current settings."""
+    proc = _proc
+    if proc and proc.poll() is None:
+        log("Restarting the search to apply new settings")
+        proc.terminate()
+        try:
+            proc.wait(timeout=30)
+        except subprocess.TimeoutExpired:
+            proc.kill()
+    threading.Thread(target=run_pipeline, kwargs={"wait": True}, daemon=True).start()
 
 
 def scheduler() -> None:
@@ -178,19 +217,8 @@ def scheduler() -> None:
 # HTTP
 # ---------------------------------------------------------------------------
 
-def page(title: str, body: str) -> bytes:
-    return f"""<!doctype html><html><head><meta charset="utf-8">
-<meta name="viewport" content="width=device-width,initial-scale=1"><title>{html.escape(title)}</title>
-<style>:root{{--line:#343a46;--field:#1b1f27;--muted:#9aa3b2}}
-body{{font-family:system-ui,sans-serif;max-width:720px;margin:1.5rem auto;padding:0 16px;
-background:#0f1115;color:#e6e6e6;line-height:1.45}}a{{color:#7cb7ff}}code,pre{{background:#1b1f27;
-padding:2px 6px;border-radius:4px}}pre{{padding:12px;white-space:pre-wrap;word-break:break-word}}
-button{{padding:8px 14px}}table.counts{{width:100%;border-collapse:collapse;margin:12px 0}}
-table.counts td{{padding:8px 4px;border-bottom:1px solid var(--line)}}table.counts td:last-child{{text-align:right}}
-.hint{{color:var(--muted)}}.guide{{background:#171b22;border:1px solid var(--line);border-radius:10px;padding:10px 14px;margin:16px 0}}.guide li{{margin:8px 0}}.big{{display:block;text-align:center;padding:14px;border-radius:10px;
-background:#2f6fed;color:#fff;font-weight:600;text-decoration:none;margin:12px 0}}
-{setup_form.FORM_CSS}</style></head>
-<body>{body}</body></html>""".encode()
+def page(title: str, body: str, active: str = "", head: str = "") -> bytes:
+    return ui.shell(title, body, active, extra_css=setup_form.FORM_CSS, head=head)
 
 
 def job_counts() -> dict[str, int] | None:
@@ -240,85 +268,147 @@ def status_html() -> bytes:
         s = dict(state)
     if s["config_problems"]:
         problems = "".join(f"<li>{html.escape(p)}</li>" for p in s["config_problems"])
-        return page("ApplyPilot status", f"""<h1>ApplyPilot</h1><h3>Setup needed</h3><ul>{problems}</ul>
-<a class="big" href="/setup">Open setup page</a>""")
+        return page("ApplyPilot status", f"""<h1>Almost ready</h1>
+<p class="sub">ApplyPilot needs a few things before it can start searching.</p>
+<div class="card"><ul style="margin:0 0 16px;padding-left:20px">{problems}</ul>
+<a class="btn primary" href="/setup">Finish setup</a></div>""", "status")
 
+    refresh = ""
     if s["running"]:
-        headline = f"🔄 Searching for jobs. Started {_ago(s['last_started'])}."
-        detail = ("A full run usually takes 30–90 minutes. This page doesn't update by itself: "
-                  "refresh it to see the numbers go up.")
+        dot, refresh = "run", '<meta http-equiv="refresh" content="60">'
+        headline = "Searching for jobs"
+        detail = (f"Started {_ago(s['last_started'])}. Jobs are scored while the search continues, and a full "
+                  "run takes 30&ndash;90 minutes. This page refreshes itself every minute.")
     elif s["last_finished"]:
         ok = s["last_exit_code"] == 0
-        headline = (f"✅ Last search finished {_ago(s['last_finished'])}." if ok else
-                    f"⚠️ Last search finished {_ago(s['last_finished'])} with some errors.")
-        detail = f"Next automatic search {_until(s['next_run'])}." if s["next_run"] else ""
+        dot = "ok" if ok else "warn"
+        headline = "Search complete" if ok else "Search finished with some errors"
+        detail = f"Finished {_ago(s['last_finished'])}."
     else:
-        headline = "Waiting to start."
-        detail = f"Next automatic search {_until(s['next_run'])}." if s["next_run"] else ""
+        dot, headline, detail = "", "Waiting to start", ""
+    nxt = _until(s["next_run"]) if s["next_run"] else "&mdash;"
 
-    c = job_counts()
-    rows = ""
-    if c:
-        steps = [
-            ("Jobs found", c["found"]),
-            ("Full job descriptions fetched", c["described"]),
-            ("Jobs scored against your resume", c["scored"]),
-            ("Good fits (7+ out of 10)", c["good_fit"]),
-            ("Tailored resumes written", c["tailored"]),
-            ("Cover letters written", c["covers"]),
-        ]
-        rows = "<table class='counts'>" + "".join(
-            f"<tr><td>{label}</td><td><b>{n}</b></td></tr>" for label, n in steps) + "</table>"
+    c = job_counts() or dict.fromkeys(("found", "described", "scored", "good_fit", "tailored", "covers"), 0)
+    tiles = "".join(
+        f'<div class="tile{cls}"><b>{val}</b><span>{label}</span></div>'
+        for val, label, cls in (
+            (c["found"], "Jobs found", ""),
+            (c["scored"], "Scored for fit", ""),
+            (c["good_fit"], "Good fits (7+)", " hl"),
+            (c["tailored"], "Resumes written", ""),
+            (c["covers"], "Cover letters", ""),
+            (nxt.replace("in about ", ""), "Next search", " txt"),
+        )
+    )
+    ready_label = f"Ready to apply ({c['tailored']})" if c["tailored"] else "Ready to apply"
+    body = f"""<h1>Status</h1>
+<p class="sub">ApplyPilot searches, scores and writes your applications automatically every 12 hours.</p>
+<div class="card status"><span class="dot {dot}"></span><div><div class="head">{headline}</div>
+<p class="muted small">{detail}</p></div></div>
+<div class="tiles">{tiles}</div>
+<div class="row"><a class="btn good" href="/ready">{ready_label}</a>
+<a class="btn ghost" href="/">Browse all jobs</a></div>
 
-    body = f"""<h1>ApplyPilot</h1>
-<p style="font-size:18px">{headline}</p>
-<p class="hint">{detail}</p>
-{rows}
-<a class="big" href="/">See jobs found (dashboard)</a>
-<p><a href="/files/tailored_resumes/">Tailored resumes</a> · <a href="/files/cover_letters/">Cover letters</a>
- · <a href="/setup">Edit setup</a></p>
-<details class="guide"{" open" if not (c and c["tailored"]) else ""}><summary><b>How to use ApplyPilot</b></summary>
-<ol>
-<li><b>Wait for a search to finish.</b> Every 12 hours ApplyPilot finds new jobs, scores each one 1&ndash;10
- against your resume, then writes a tailored resume and a cover letter for every job scoring 7 or higher.
- You don't need to press anything.</li>
-<li><b>Open the dashboard</b> with the blue button above. Tap <b>7+ Strong</b> to see only your best matches.
- Each card shows why it scored that way.</li>
-<li><b>Pick a job</b> and tap the green <b>Resume</b> button to download the resume written for that job.
- Read it over and fix anything that isn't quite right.</li>
-<li><b>Tap Apply</b> (or View job) to open the real job posting, and apply there using that resume.</li>
-<li><b>Cover letter (optional):</b> if the application asks for one, tap the green <b>Cover letter</b>
- button, copy it, and paste or upload it.</li>
-</ol>
-<p class="hint">Green buttons only appear on jobs scoring 7+, once their resume has been written.
- To change the jobs it looks for, use <a href="/setup">Edit setup</a>.</p>
-</details>
-<details><summary class="hint">More options</summary>
-<p class="hint">Searches run automatically every few hours. Use this only to start one right now;
-it does nothing while a search is already running.</p>
-<form method="post" action="/run"><button>Start a search now</button></form></details>"""
-    return page("ApplyPilot status", body)
+<details class="card" style="margin-top:22px"{" open" if not c["tailored"] else ""}>
+<summary><b>How it works</b></summary>
+<ol class="steps" style="margin-top:16px">
+<li><b>It searches for you.</b> <span class="muted">Every 12 hours it finds jobs matching your titles,
+ scores each one 1&ndash;10 against your resume, and writes a tailored resume and cover letter for every job
+ scoring 7 or more. Nothing to press.</span></li>
+<li><b>Open Ready to apply.</b> <span class="muted">Your best matches, highest score first, each with its own
+ resume and cover letter.</span></li>
+<li><b>Download the resume.</b> <span class="muted">Tap <b>Resume</b> and read it over. Fix anything that
+ isn't quite right.</span></li>
+<li><b>Apply on the company's site.</b> <span class="muted">Tap <b>Apply</b> to open the real posting and
+ upload that resume.</span></li>
+<li><b>Cover letter, if asked.</b> <span class="muted">Tap <b>Cover letter</b>, then paste or upload it.</span></li>
+</ol></details>
 
-
-NAV_HTML = """<nav style="display:flex;gap:18px;flex-wrap:wrap;align-items:center;padding:10px 0 18px;
-font-size:15px"><a href="/status" style="color:#60a5fa">← Status &amp; how-to</a>
-<a href="/setup" style="color:#60a5fa">Edit setup</a>
-<a href="/files/tailored_resumes/" style="color:#60a5fa">All tailored resumes</a>
-<a href="/files/cover_letters/" style="color:#60a5fa">All cover letters</a></nav>"""
+<details class="card"><summary class="muted">More options</summary>
+<p class="muted small">Searches start on their own. Use this only to start one right now; it does nothing while a
+search is already running.</p>
+<form method="post" action="/run"><button class="btn ghost sm">Start a search now</button></form>
+<p class="muted small" style="margin-bottom:0">All files: <a href="/files/tailored_resumes/">tailored resumes</a>
+ &middot; <a href="/files/cover_letters/">cover letters</a></p></details>"""
+    return page("ApplyPilot status", body, "status", head=refresh)
 
 
-def add_nav(dashboard_html: str) -> str:
-    """Put links back to the rest of the site at the top of the generated dashboard."""
-    return dashboard_html.replace("<body>", "<body>" + NAV_HTML, 1)
+def _doc_href(path_str: str | None) -> str | None:
+    """Download link for a generated document, preferring its PDF."""
+    if not path_str:
+        return None
+    path = Path(path_str)
+    if path.with_suffix(".pdf").exists():
+        path = path.with_suffix(".pdf")
+    elif not path.exists():
+        return None
+    try:
+        return "/" + path.resolve().relative_to(DATA_DIR.resolve()).as_posix()
+    except ValueError:
+        return None
+
+
+def ready_html() -> bytes:
+    import sqlite3
+    db = DATA_DIR / "applypilot.db"
+    jobs = []
+    if db.exists():
+        try:
+            conn = sqlite3.connect(f"file:{db}?mode=ro", uri=True, timeout=5)
+            conn.row_factory = sqlite3.Row
+            jobs = conn.execute(
+                "SELECT title, site, location, url, application_url, fit_score, tailored_resume_path, "
+                "cover_letter_path FROM jobs WHERE tailored_resume_path IS NOT NULL "
+                "ORDER BY fit_score DESC, tailored_at DESC").fetchall()
+            conn.close()
+        except sqlite3.Error as e:
+            log(f"Ready page query failed: {e}")
+    if not jobs:
+        c = job_counts() or {"good_fit": 0}
+        note = (f"{c['good_fit']} good fits found so far. Their resumes are being written now."
+                if c["good_fit"] else "Jobs scoring 7 or more will show up here with their own resume and cover letter.")
+        body = f"""<h1>Ready to apply</h1>
+<div class="card empty"><div class="big">📝</div><h2>Nothing ready yet</h2>
+<p class="muted">{note}</p><a class="btn ghost" href="/status">Check progress</a></div>"""
+        return page("Ready to apply", body, "ready")
+
+    cards = []
+    for j in jobs:
+        score = j["fit_score"] or 0
+        apply_url = j["application_url"] or j["url"] or ""
+        meta = " &middot; ".join(html.escape(x) for x in (j["site"], j["location"]) if x)
+        actions = []
+        if href := _doc_href(j["tailored_resume_path"]):
+            actions.append(f'<a class="btn good sm" href="{html.escape(href)}" target="_blank">Resume</a>')
+        if href := _doc_href(j["cover_letter_path"]):
+            actions.append(f'<a class="btn ghost sm" href="{html.escape(href)}" target="_blank">Cover letter</a>')
+        if apply_url:
+            actions.append(f'<a class="btn primary sm" href="{html.escape(apply_url)}" target="_blank" '
+                           f'rel="noopener">Apply &rarr;</a>')
+        cards.append(f"""<div class="card job"><div class="job-top">
+<div class="score{'' if score >= 7 else ' mid'}">{score}</div><div>
+<a class="job-title" href="{html.escape(j['url'] or apply_url)}" target="_blank" rel="noopener">
+{html.escape(j['title'] or 'Untitled')}</a><div class="meta">{meta}</div></div></div>
+<div class="row" style="gap:8px">{''.join(actions)}</div></div>""")
+    body = f"""<h1>Ready to apply</h1>
+<p class="sub">{len(jobs)} job{'s' if len(jobs) != 1 else ''} with a tailored resume, best match first. Download the
+resume, then tap Apply.</p>
+<div class="stack">{''.join(cards)}</div>"""
+    return page("Ready to apply", body, "ready")
 
 
 def listing_html(rel: str, directory: Path) -> bytes:
-    items = sorted(directory.iterdir(), key=lambda p: p.stat().st_mtime, reverse=True)
+    items = sorted((p for p in directory.iterdir() if p.is_file() and p.suffix in (".pdf", ".txt")
+                    and not p.stem.endswith("_JOB")), key=lambda p: p.stat().st_mtime, reverse=True)
     rows = "".join(
-        f'<li><a href="/files/{rel}/{html.escape(p.name)}">{html.escape(p.name)}</a></li>'
-        for p in items if p.is_file()
+        f'<a href="/files/{rel}/{html.escape(p.name)}" target="_blank">{html.escape(p.stem.replace("_", " "))}'
+        f'<span>{p.suffix[1:].upper()}</span></a>' for p in items
     )
-    return page(rel, f'<p><a href="/status">← status</a></p><h1>{rel}</h1><ul>{rows or "<li>(empty)</li>"}</ul>')
+    title = rel.replace("_", " ").capitalize()
+    body = (f'<h1>{title}</h1><p class="sub">Every file generated so far. '
+            f'<a href="/ready">Ready to apply</a> shows them matched to their jobs.</p>'
+            f'<div class="card files">{rows or "<p class=muted>Nothing here yet.</p>"}</div>')
+    return page(title, body)
 
 
 class Handler(BaseHTTPRequestHandler):
@@ -363,7 +453,7 @@ class Handler(BaseHTTPRequestHandler):
             return
 
         if path == "/setup":
-            return self._send(200, page("ApplyPilot setup", setup_form.render(DATA_DIR, os.environ)))
+            return self._send(200, page("ApplyPilot setup", setup_form.render(DATA_DIR, os.environ), "setup"))
         if path == "/":
             if seed_config():
                 return self._send(303, b"", "text/plain", {"Location": "/setup"})
@@ -375,10 +465,12 @@ class Handler(BaseHTTPRequestHandler):
                 except Exception as e:  # noqa: BLE001 - fall back to the last generated dashboard
                     log(f"Dashboard refresh failed: {e}")
             if dash.exists():
-                return self._send(200, add_nav(dash.read_text(encoding="utf-8")).encode())
+                return self._send(200, ui.dashboard_with_topbar(dash.read_text(encoding="utf-8")).encode())
             return self._send(200, status_html())
         if path == "/status":
             return self._send(200, status_html())
+        if path == "/ready":
+            return self._send(200, ready_html())
         if path == "/status.json":
             with _state_lock:
                 return self._send(200, json.dumps(state).encode(), "application/json")
@@ -425,13 +517,12 @@ class Handler(BaseHTTPRequestHandler):
         if errors:
             log(f"Setup form not complete: {errors}")
             return self._send(200, page("ApplyPilot setup",
-                                        setup_form.render(DATA_DIR, os.environ, fields, errors)))
+                                        setup_form.render(DATA_DIR, os.environ, fields, errors), "setup"))
         log("Setup saved from the web form")
         with _state_lock:
             state["config_problems"] = seed_config()
-        if not _run_lock.locked():
-            threading.Thread(target=run_pipeline, daemon=True).start()
-        self._send(200, page("ApplyPilot setup", setup_form.render(DATA_DIR, os.environ, saved=True)))
+        restart_pipeline()
+        self._send(200, page("ApplyPilot setup", setup_form.render(DATA_DIR, os.environ, saved=True), "setup"))
 
 
 def main() -> None:

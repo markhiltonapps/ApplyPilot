@@ -126,6 +126,43 @@ def _env_values(data_dir: Path) -> dict[str, str]:
     return {k: v for k, v in dotenv_values(path).items() if v} if path.exists() else {}
 
 
+OPENROUTER_URL = "https://openrouter.ai/api/v1"
+OPENROUTER_MODEL = "anthropic/claude-haiku-5.5"
+
+
+def _write_env(data_dir: Path, env: dict[str, str]) -> None:
+    (data_dir / ".env").write_text("".join(f"{k}={v}\n" for k, v in env.items()), encoding="utf-8")
+
+
+def current_provider(data_dir: Path) -> str:
+    return "openrouter" if _env_values(data_dir).get("LLM_URL", "").startswith(OPENROUTER_URL) else "gemini"
+
+
+def _provider_has_key(data_dir: Path, environ: dict, provider: str) -> bool:
+    env = _env_values(data_dir)
+    if provider == "openrouter":
+        return bool(env.get("LLM_API_KEY"))
+    return bool(environ.get("GEMINI_API_KEY") or env.get("GEMINI_API_KEY"))
+
+
+def _check_openrouter_key(key: str) -> str | None:
+    """Return an error message if OpenRouter rejects the key or the account has no credit."""
+    import httpx
+    headers = {"Authorization": f"Bearer {key}"}
+    try:
+        r = httpx.get(f"{OPENROUTER_URL}/key", headers=headers, timeout=15)
+        if r.status_code in (401, 403):
+            return "OpenRouter rejected that key. Copy it again from openrouter.ai/settings/keys."
+        c = httpx.get(f"{OPENROUTER_URL}/credits", headers=headers, timeout=15)
+        if c.status_code == 200:
+            d = c.json().get("data", {})
+            if float(d.get("total_credits") or 0) - float(d.get("total_usage") or 0) <= 0:
+                return "That OpenRouter account has no credit. Add some at openrouter.ai/settings/credits."
+    except (httpx.HTTPError, ValueError):
+        return None
+    return None
+
+
 def has_llm_key(data_dir: Path, environ: dict) -> bool:
     keys = ("GEMINI_API_KEY", "OPENAI_API_KEY", "LLM_URL")
     return any(environ.get(k) for k in keys) or any(k in _env_values(data_dir) for k in keys)
@@ -217,18 +254,33 @@ def save(data_dir: Path, fields: dict[str, str], files: dict[str, tuple[str, byt
     elif not (data_dir / "resume.txt").exists():
         errors.append("Add your resume: upload the file or paste the text.")
 
-    # API key
-    key = re.sub(r"\s", "", f.get("gemini_key", ""))
-    if key:
-        problem = _check_gemini_key(key)
+    # AI provider and key
+    provider = f.get("provider") or current_provider(data_dir)
+    if provider == "openrouter":
+        key = re.sub(r"\s", "", f.get("openrouter_key", ""))
+        problem = _check_openrouter_key(key) if key else None
         if problem:
             errors.append(problem)
-        else:
+        elif key or _provider_has_key(data_dir, environ, "openrouter"):
             env = _env_values(data_dir)
-            env["GEMINI_API_KEY"] = key
-            (data_dir / ".env").write_text("".join(f"{k}={v}\n" for k, v in env.items()), encoding="utf-8")
-    elif not has_llm_key(data_dir, environ):
-        errors.append("Add your Gemini API key.")
+            env.update({"LLM_URL": OPENROUTER_URL, "LLM_MODEL": env.get("LLM_MODEL") or OPENROUTER_MODEL})
+            if key:
+                env["LLM_API_KEY"] = key
+            _write_env(data_dir, env)
+        else:
+            errors.append("Add your OpenRouter API key.")
+    else:
+        key = re.sub(r"\s", "", f.get("gemini_key", ""))
+        problem = _check_gemini_key(key) if key else None
+        if problem:
+            errors.append(problem)
+        elif key or _provider_has_key(data_dir, environ, "gemini"):
+            env = {k: v for k, v in _env_values(data_dir).items() if k not in ("LLM_URL", "LLM_MODEL")}
+            if key:
+                env["GEMINI_API_KEY"] = key
+            _write_env(data_dir, env)
+        else:
+            errors.append("Add your Gemini API key.")
 
     for name, label in (("full_name", "Full name"), ("email", "Email"), ("city", "City"),
                         ("country", "Country"), ("titles", "Job titles")):
@@ -242,7 +294,7 @@ def save(data_dir: Path, fields: dict[str, str], files: dict[str, tuple[str, byt
     if errors:
         return errors
 
-    stored = {k: v for k, v in f.items() if k not in ("gemini_key", "resume_text")}
+    stored = {k: v for k, v in f.items() if k not in ("gemini_key", "openrouter_key", "resume_text")}
     (data_dir / "setup_form.json").write_text(json.dumps(stored, indent=2), encoding="utf-8")
     write_config(data_dir, stored)
     return []
@@ -353,8 +405,8 @@ def write_config(data_dir: Path, f: dict[str, str]) -> None:
 # ---------------------------------------------------------------------------
 
 FORM_CSS = """
-form.setup fieldset{border:1px solid var(--line);border-radius:10px;margin:0 0 18px;padding:14px}
-form.setup legend{font-weight:600;padding:0 6px}
+form.setup fieldset{border:1px solid var(--line);border-radius:14px;margin:0 0 16px;padding:16px 18px 18px;background:var(--surface)}
+form.setup legend{font-weight:650;padding:0 8px;background:var(--surface);border-radius:6px}
 form.setup label{display:block;margin:10px 0 4px;font-size:15px}
 form.setup input[type=text],form.setup input[type=email],form.setup input[type=password],
 form.setup input[type=url],form.setup select,form.setup textarea{width:100%;box-sizing:border-box;
@@ -363,9 +415,13 @@ background:var(--field);color:inherit}
 form.setup textarea{min-height:90px}
 form.setup .row{display:flex;gap:10px}form.setup .row>div{flex:1;min-width:0}
 form.setup .check{display:flex;gap:8px;align-items:center;margin:8px 0}
+form.setup label.choice{display:flex;gap:10px;align-items:flex-start;padding:12px;margin:8px 0;border:1px solid var(--line);
+border-radius:10px;cursor:pointer;background:var(--bg)}
+form.setup label.choice input{margin-top:4px}
+form.setup label.choice:has(input:checked){border-color:var(--accent);background:#5b9dff14}
 form.setup .hint{color:var(--muted);font-size:14px;margin:4px 0 0}
 form.setup button{width:100%;font-size:17px;padding:14px;border-radius:10px;border:0;
-background:#2f6fed;color:#fff;font-weight:600}
+background:var(--accent);color:var(--accent-ink);font-weight:650;cursor:pointer}
 .errors{background:#4a1d1d;border:1px solid #a33;border-radius:10px;padding:10px 14px;margin:0 0 16px}
 .ok{background:#173a22;border:1px solid #2f7d48;border-radius:10px;padding:10px 14px;margin:0 0 16px}
 """
@@ -408,10 +464,17 @@ def render(data_dir: Path, environ: dict, values: dict[str, str] | None = None,
         resume_note = f"✅ Resume saved ({words} words). Upload a new file only if you want to replace it."
     else:
         resume_note = "PDF, Word (.docx) or text file."
-    key_saved = has_llm_key(data_dir, environ)
-    key_hint = ("✅ Key saved. Leave blank to keep it." if key_saved else
-                'Free. Open <a href="https://aistudio.google.com/apikey" target="_blank">aistudio.google.com/apikey</a>, '
+    provider = v.get("provider") or current_provider(data_dir)
+    gem_saved = _provider_has_key(data_dir, environ, "gemini")
+    or_saved = _provider_has_key(data_dir, environ, "openrouter")
+    gem_hint = ("✅ Key saved. Leave blank to keep it." if gem_saved else
+                'Open <a href="https://aistudio.google.com/apikey" target="_blank">aistudio.google.com/apikey</a>, '
                 'sign in with Google, tap <b>Create API key</b>, copy it and paste it here.')
+    or_hint = ("✅ Key saved. Leave blank to keep it." if or_saved else
+               '1. Sign up at <a href="https://openrouter.ai" target="_blank">openrouter.ai</a>. '
+               '2. Add $5&ndash;10 at <a href="https://openrouter.ai/settings/credits" target="_blank">Credits</a>. '
+               '3. Open <a href="https://openrouter.ai/settings/keys" target="_blank">Keys</a>, tap <b>Create</b>, '
+               'copy the key (starts with sk-or-) and paste it here.')
 
     top = ""
     if errors:
@@ -425,9 +488,8 @@ def render(data_dir: Path, environ: dict, values: dict[str, str] | None = None,
         top = ('<div class="ok"><b>Saved.</b> ApplyPilot is now searching for jobs. The first run can take '
                'up to an hour. Check progress on the <a href="/status">status page</a>.</div>')
 
-    return f"""<p><a href="/status">← Status</a></p>
-<h1>Set up ApplyPilot</h1>
-<p class="hint">Fill this in once. You can come back and change it any time.</p>
+    return f"""<h1>Setup</h1>
+<p class="sub">Fill this in once. You can come back and change it any time.</p>
 {top}
 <form class="setup" method="post" action="/setup" enctype="multipart/form-data">
 <fieldset><legend>1. Your resume</legend>
@@ -439,10 +501,24 @@ def render(data_dir: Path, environ: dict, values: dict[str, str] | None = None,
 <textarea name="resume_text" placeholder="Paste your whole resume here"></textarea></details>
 </fieldset>
 
-<fieldset><legend>2. Gemini API key</legend>
-<label for="gemini_key">API key{"" if key_saved else " *"}</label>
-<input type="password" id="gemini_key" name="gemini_key" autocomplete="off" placeholder="{"••••••••" if key_saved else "AIza…"}">
-<p class="hint">{key_hint}</p>
+<fieldset><legend>2. AI service</legend>
+<p class="hint" style="margin-top:0">ApplyPilot uses an AI service to score jobs and write your resumes.</p>
+<label class="choice"><input type="radio" name="provider" value="openrouter"{" checked" if provider == "openrouter" else ""}>
+<span><b>OpenRouter</b> &mdash; recommended. Pay as you go, about $1 or less per full search. Reliable.</span></label>
+<label class="choice"><input type="radio" name="provider" value="gemini"{" checked" if provider == "gemini" else ""}>
+<span><b>Google Gemini</b> &mdash; free, but often busy and slow.</span></label>
+<div class="pk" data-for="openrouter">
+<label for="openrouter_key">OpenRouter API key</label>
+<input type="password" id="openrouter_key" name="openrouter_key" autocomplete="off" placeholder="{"••••••••" if or_saved else "sk-or-…"}">
+<p class="hint">{or_hint}</p></div>
+<div class="pk" data-for="gemini">
+<label for="gemini_key">Gemini API key</label>
+<input type="password" id="gemini_key" name="gemini_key" autocomplete="off" placeholder="{"••••••••" if gem_saved else "AIza…"}">
+<p class="hint">{gem_hint}</p></div>
+<script>
+(function(){{var r=document.querySelectorAll('input[name=provider]');function u(){{var v=(document.querySelector('input[name=provider]:checked')||{{}}).value;
+document.querySelectorAll('.pk').forEach(function(d){{d.style.display=d.dataset.for===v?'':'none'}})}}r.forEach(function(x){{x.addEventListener('change',u)}});u()}})();
+</script>
 </fieldset>
 
 <fieldset><legend>3. About you</legend>

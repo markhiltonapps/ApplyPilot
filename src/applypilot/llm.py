@@ -71,6 +71,15 @@ _TIMEOUT = 120  # seconds
 _RATE_LIMIT_BASE_WAIT = 10
 
 
+# Gemini 3.x models always "think", and thinking tokens come out of the
+# output budget: a 512-token score request can return an empty answer. Ask for
+# low thinking and add this much headroom on top of what the caller needs.
+_GEMINI_THINKING_HEADROOM = 4096
+
+# Current Flash models to try, in order, when Google keeps answering 503
+# (model overloaded). Only used when LLM_MODEL isn't set explicitly.
+_GEMINI_FALLBACK_MODELS = ["gemini-3.8-flash", "gemini-3.6-flash", "gemini-3.5-flash-lite"]
+
 _GEMINI_COMPAT_BASE = "https://generativelanguage.googleapis.com/v1beta/openai"
 _GEMINI_NATIVE_BASE = "https://generativelanguage.googleapis.com/v1beta"
 
@@ -92,6 +101,10 @@ class LLMClient:
         # True once we've confirmed the native Gemini API works for this model
         self._use_native_gemini: bool = False
         self._is_gemini: bool = base_url.startswith(_GEMINI_COMPAT_BASE)
+        self._fallback_models: list[str] = (
+            [m for m in _GEMINI_FALLBACK_MODELS if m != model]
+            if self._is_gemini and not os.environ.get("LLM_MODEL") else []
+        )
 
     # -- Native Gemini API --------------------------------------------------
 
@@ -127,7 +140,7 @@ class LLMClient:
             "contents": contents,
             "generationConfig": {
                 "temperature": temperature,
-                "maxOutputTokens": max_tokens,
+                "maxOutputTokens": max_tokens + _GEMINI_THINKING_HEADROOM,
             },
         }
         if system_parts:
@@ -142,7 +155,11 @@ class LLMClient:
         )
         resp.raise_for_status()
         data = resp.json()
-        return data["candidates"][0]["content"]["parts"][0]["text"]
+        parts = (data.get("candidates") or [{}])[0].get("content", {}).get("parts") or []
+        text = "".join(p.get("text", "") for p in parts if not p.get("thought"))
+        if not text.strip():
+            raise _EmptyResponse(self.model)
+        return text
 
     # -- OpenAI-compat API --------------------------------------------------
 
@@ -163,6 +180,9 @@ class LLMClient:
             "temperature": temperature,
             "max_tokens": max_tokens,
         }
+        if self._is_gemini:
+            payload["max_tokens"] = max_tokens + _GEMINI_THINKING_HEADROOM
+            payload["reasoning_effort"] = os.environ.get("LLM_REASONING_EFFORT", "low")
 
         resp = self._client.post(
             f"{self.base_url}/chat/completions",
@@ -175,13 +195,16 @@ class LLMClient:
         if resp.status_code == 403 and self._is_gemini:
             raise _GeminiCompatForbidden(resp)
 
-        return self._handle_compat_response(resp)
+        return self._handle_compat_response(resp, self.model)
 
     @staticmethod
-    def _handle_compat_response(resp: httpx.Response) -> str:
+    def _handle_compat_response(resp: httpx.Response, model: str = "") -> str:
         resp.raise_for_status()
         data = resp.json()
-        return data["choices"][0]["message"]["content"]
+        content = data["choices"][0]["message"].get("content") or ""
+        if not content.strip():
+            raise _EmptyResponse(model)
+        return content
 
     # -- public API ---------------------------------------------------------
 
@@ -219,6 +242,8 @@ class LLMClient:
                 # Retry immediately with native — don't count as a rate-limit wait
                 try:
                     return self._chat_native_gemini(messages, temperature, max_tokens)
+                except _EmptyResponse:
+                    continue  # next attempt goes straight to the native API
                 except httpx.HTTPStatusError as native_exc:
                     raise RuntimeError(
                         f"Both Gemini endpoints failed. Compat: 403 Forbidden. "
@@ -226,8 +251,23 @@ class LLMClient:
                         f"{native_exc.response.text[:200]}"
                     ) from native_exc
 
+            except _EmptyResponse:
+                # Usually the whole output budget went on thinking. Retry, then give up
+                # with an empty string so callers handle it like any unusable answer.
+                if attempt < _MAX_RETRIES - 1:
+                    log.warning("LLM returned an empty answer (model %s), retrying (%d/%d)",
+                                self.model, attempt + 1, _MAX_RETRIES)
+                    time.sleep(2)
+                    continue
+                return ""
+
             except httpx.HTTPStatusError as exc:
                 resp = exc.response
+                if resp.status_code == 503 and attempt >= 1 and self._fallback_models:
+                    old, self.model = self.model, self._fallback_models.pop(0)
+                    self._use_native_gemini = False
+                    log.warning("Gemini model %s is overloaded (HTTP 503); switching to %s", old, self.model)
+                    continue
                 if resp.status_code in (429, 503) and attempt < _MAX_RETRIES - 1:
                     # Respect Retry-After header if provided (Gemini sends this).
                     retry_after = (
@@ -271,6 +311,10 @@ class LLMClient:
 
     def close(self) -> None:
         self._client.close()
+
+
+class _EmptyResponse(Exception):
+    """The model answered with no text (often: thinking used up the output budget)."""
 
 
 class _GeminiCompatForbidden(Exception):

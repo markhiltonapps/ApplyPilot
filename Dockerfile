@@ -20,7 +20,7 @@ RUN pip install . \
     && playwright install --with-deps chromium \
     && rm -rf /var/lib/apt/lists/*
 
-COPY deploy/server.py deploy/setup_form.py ./deploy/
+COPY deploy/server.py deploy/setup_form.py deploy/ui.py ./deploy/
 
 # Data lives in $APPLYPILOT_DIR (/data); mount a persistent volume there.
 EXPOSE 8080
