@@ -137,6 +137,7 @@ def _check_gemini_key(key: str) -> str | None:
     except httpx.HTTPError:
         return None
     if r.status_code in (400, 401, 403):
+        print(f"[setup] Gemini key check failed: HTTP {r.status_code} {r.text[:300]}", flush=True)
         return "Google rejected that Gemini API key. Copy it again from aistudio.google.com/apikey."
     return None
 
@@ -146,7 +147,12 @@ def _lines(value: str) -> list[str]:
 
 
 def save(data_dir: Path, fields: dict[str, str], files: dict[str, tuple[str, bytes]], environ: dict) -> list[str]:
-    """Validate the form and write ApplyPilot's config files. Returns error messages."""
+    """Validate the form and write ApplyPilot's config files. Returns error messages.
+
+    The resume and API key are saved as soon as they're valid, even if other
+    fields still have errors: browsers can't refill file and password inputs
+    when the form is shown again, so holding them back would lose them.
+    """
     errors: list[str] = []
     f = {k: v.strip() for k, v in fields.items()}
     data_dir.mkdir(parents=True, exist_ok=True)
@@ -165,7 +171,11 @@ def save(data_dir: Path, fields: dict[str, str], files: dict[str, tuple[str, byt
                 errors.append(str(e) if isinstance(e, ValueError) else f"Couldn't read that file ({e}).")
     elif f.get("resume_text"):
         resume_text = fields["resume_text"].strip()
-    if resume_text is None and not (data_dir / "resume.txt").exists():
+    if resume_text is not None:
+        (data_dir / "resume.txt").write_text(resume_text + "\n", encoding="utf-8")
+        if upload and upload[0].lower().endswith(".pdf"):
+            (data_dir / "resume.pdf").write_bytes(upload[1])
+    elif not (data_dir / "resume.txt").exists():
         errors.append("Add your resume: upload the file or paste the text.")
 
     # API key
@@ -174,6 +184,10 @@ def save(data_dir: Path, fields: dict[str, str], files: dict[str, tuple[str, byt
         problem = _check_gemini_key(key)
         if problem:
             errors.append(problem)
+        else:
+            env = _env_values(data_dir)
+            env["GEMINI_API_KEY"] = key
+            (data_dir / ".env").write_text("".join(f"{k}={v}\n" for k, v in env.items()), encoding="utf-8")
     elif not has_llm_key(data_dir, environ):
         errors.append("Add your Gemini API key.")
 
@@ -186,16 +200,6 @@ def save(data_dir: Path, fields: dict[str, str], files: dict[str, tuple[str, byt
 
     if errors:
         return errors
-
-    # Everything validated: write files.
-    if resume_text is not None:
-        (data_dir / "resume.txt").write_text(resume_text + "\n", encoding="utf-8")
-        if upload and upload[0].lower().endswith(".pdf"):
-            (data_dir / "resume.pdf").write_bytes(upload[1])
-    if key:
-        env = _env_values(data_dir)
-        env["GEMINI_API_KEY"] = key
-        (data_dir / ".env").write_text("".join(f"{k}={v}\n" for k, v in env.items()), encoding="utf-8")
 
     stored = {k: v for k, v in f.items() if k not in ("gemini_key", "resume_text")}
     (data_dir / "setup_form.json").write_text(json.dumps(stored, indent=2), encoding="utf-8")
@@ -352,8 +356,12 @@ def render(data_dir: Path, environ: dict, values: dict[str, str] | None = None,
 
     top = ""
     if errors:
-        top = '<div class="errors"><b>Please fix:</b><ul>' + "".join(
-            f"<li>{html.escape(e)}</li>" for e in errors) + "</ul></div>"
+        kept = [name for name, ok in (("resume", (data_dir / "resume.txt").exists()),
+                                      ("API key", has_llm_key(data_dir, environ))) if ok]
+        kept_note = (f"<p>Your {' and '.join(kept)} {'are' if len(kept) > 1 else 'is'} saved, "
+                     "so you don't need to add them again.</p>") if kept else ""
+        top = '<div class="errors"><b>Almost there. Please fix:</b><ul>' + "".join(
+            f"<li>{html.escape(e)}</li>" for e in errors) + "</ul>" + kept_note + "</div>"
     elif saved:
         top = ('<div class="ok"><b>Saved.</b> ApplyPilot is now searching for jobs. The first run can take '
                'up to an hour. Check progress on the <a href="/status">status page</a>.</div>')

@@ -308,6 +308,7 @@ class Handler(BaseHTTPRequestHandler):
         fields, files = setup_form.parse_multipart(self.headers.get("Content-Type", ""), body)
         errors = setup_form.save(DATA_DIR, fields, files, os.environ)
         if errors:
+            log(f"Setup form not complete: {errors}")
             return self._send(200, page("ApplyPilot setup",
                                         setup_form.render(DATA_DIR, os.environ, fields, errors)))
         log("Setup saved from the web form")
