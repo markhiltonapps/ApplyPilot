@@ -166,6 +166,16 @@ def requeue_failed_scores() -> None:
                              "AND COALESCE(tailor_attempts, 0) > 0").rowcount
             reset_marker.write_text("1")
             log(f"Reset tailoring attempts for {r} job(s)")
+        # One-time: rewrite every resume and cover letter made before roles were kept separate
+        # with their exact dates (older ones merged the Compaq roles) and the email was updated.
+        retailor_marker = DATA_DIR / ".retailor_v2"
+        if not retailor_marker.exists():
+            r = conn.execute(
+                "UPDATE jobs SET tailored_resume_path = NULL, tailored_at = NULL, tailor_attempts = 0, "
+                "cover_letter_path = NULL, cover_letter_at = NULL, cover_attempts = 0 "
+                "WHERE tailored_resume_path IS NOT NULL OR cover_letter_path IS NOT NULL").rowcount
+            retailor_marker.write_text("1")
+            log(f"Rewriting resumes and cover letters for {r} job(s)")
         conn.commit()
         conn.close()
         if n:

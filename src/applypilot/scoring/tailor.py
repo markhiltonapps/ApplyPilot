@@ -111,7 +111,8 @@ BULLETS: Strong verb + what you built + quantified impact. Vary verbs (Built, De
 - Do NOT change real numbers ({metrics_str})
 - EXPERIENCE must include a role at EVERY one of these companies, with the company name written exactly as shown (you may shorten their bullets): {companies_str}
 - Preserved school: {school}
-- Must fit 1 page.
+- Keep each role separate: same title, company and dates as the original. NEVER merge roles, rename them, or change dates. To save space, give older roles fewer bullets (an old role can be a single line with no bullets) instead of combining them.
+- At most 2 pages.
 
 ## OUTPUT: Return ONLY valid JSON. No markdown fences. No commentary. No "here is" preamble.
 
@@ -344,6 +345,31 @@ def judge_tailored_resume(
     }
 
 
+_DATE_RANGE = re.compile(
+    r"((?:19|20)\d{2})\s*[\u2013\u2014-]+\s*(?:[A-Za-z]{3,9}\.?\s+)?((?:19|20)\d{2}|present|current)",
+    re.IGNORECASE,
+)
+
+
+def _role_date_errors(data: dict, resume_text: str) -> list[str]:
+    """Experience dates must match a real role: catches merged roles like "Compaq 1993 - 2002"."""
+    def pairs(text: str) -> set[tuple[str, str]]:
+        return {(a, "present" if b.lower() in ("present", "current") else b)
+                for a, b in _DATE_RANGE.findall(text)}
+
+    real = pairs(resume_text)
+    errors = []
+    for entry in data.get("experience") or []:
+        if not isinstance(entry, dict):
+            continue
+        for start, end in pairs(f"{entry.get('header', '')} {entry.get('subtitle', '')}"):
+            if real and (start, end) not in real:
+                errors.append(
+                    f"Dates {start}-{end} for '{entry.get('header', '')}' don't match any role in the original "
+                    "resume. Keep each role separate with its exact original dates; never merge roles.")
+    return errors
+
+
 # ── Core Tailoring ───────────────────────────────────────────────────────
 
 def tailor_resume(
@@ -416,6 +442,10 @@ def tailor_resume(
 
         # Layer 1: Validate JSON fields
         validation = validate_json_fields(data, profile, mode=validation_mode)
+        date_errors = _role_date_errors(data, resume_text)
+        if date_errors:
+            validation = {**validation, "passed": False,
+                          "errors": list(validation.get("errors", [])) + date_errors}
         report["validator"] = validation
 
         if not validation["passed"]:
