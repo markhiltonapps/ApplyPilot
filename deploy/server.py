@@ -158,6 +158,14 @@ def requeue_failed_scores() -> None:
                              "WHERE fit_score IS NOT NULL AND tailored_resume_path IS NULL").rowcount
             marker.write_text(version)
             log(f"Resume or scoring instructions changed; re-scoring {m} job(s)")
+        # One-time: tailoring attempts that failed because replies were cut off (output limit,
+        # then OpenRouter's default reasoning) shouldn't count toward the 5-attempt cap.
+        reset_marker = DATA_DIR / ".tailor_attempts_reset_v1"
+        if not reset_marker.exists():
+            r = conn.execute("UPDATE jobs SET tailor_attempts = 0 WHERE tailored_resume_path IS NULL "
+                             "AND COALESCE(tailor_attempts, 0) > 0").rowcount
+            reset_marker.write_text("1")
+            log(f"Reset tailoring attempts for {r} job(s)")
         conn.commit()
         conn.close()
         if n:

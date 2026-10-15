@@ -183,6 +183,12 @@ class LLMClient:
         if self._is_gemini:
             payload["max_tokens"] = max_tokens + _GEMINI_THINKING_HEADROOM
             payload["reasoning_effort"] = os.environ.get("LLM_REASONING_EFFORT", "low")
+        elif "openrouter.ai" in self.base_url:
+            # OpenRouter enables reasoning by default for many models (e.g. Claude at medium
+            # effort), and reasoning tokens come out of max_tokens: short answers came back
+            # empty and long ones cut off. These tasks don't need it.
+            effort = os.environ.get("LLM_REASONING_EFFORT")
+            payload["reasoning"] = {"effort": effort} if effort else {"enabled": False}
 
         resp = self._client.post(
             f"{self.base_url}/chat/completions",
@@ -201,7 +207,10 @@ class LLMClient:
     def _handle_compat_response(resp: httpx.Response, model: str = "") -> str:
         resp.raise_for_status()
         data = resp.json()
-        content = data["choices"][0]["message"].get("content") or ""
+        choice = data["choices"][0]
+        content = choice["message"].get("content") or ""
+        if choice.get("finish_reason") == "length":
+            log.warning("LLM reply hit the output limit (model %s, %d chars)", model, len(content))
         if not content.strip():
             raise _EmptyResponse(model)
         return content
