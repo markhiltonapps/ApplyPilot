@@ -22,11 +22,13 @@ import os
 import shutil
 import subprocess
 import sys
+import time
 import urllib.error
 import urllib.request
 import zipfile
 from pathlib import Path
 
+VERSION = "3"
 SERVER = "__SERVER_URL__"  # filled in by the server when you download this file
 USER = "applypilot"
 MODEL = os.environ.get("APPLYPILOT_MODEL", "sonnet")  # Claude model used to fill in forms
@@ -232,9 +234,31 @@ def show_jobs(manifest: dict, min_score: int) -> list[dict]:
     return jobs
 
 
-def apply_now(limit: int, min_score: int, practice: bool, url: str | None = None) -> None:
+def apply_now(limit: int, min_score: int, practice: bool, url: str | None = None,
+              password: str = "") -> None:
     from applypilot.apply.launcher import main as apply_main
-    apply_main(limit=limit, target_url=url, min_score=min_score, model=MODEL, dry_run=practice, workers=1)
+    started = time.time()
+    try:
+        apply_main(limit=limit, target_url=url, min_score=min_score, model=MODEL, dry_run=practice, workers=1)
+    finally:
+        send_logs(password, started, practice)
+
+
+def send_logs(password: str, since: float, practice: bool) -> None:
+    """Share this run's notes with your server so problems can be diagnosed from there."""
+    from applypilot.config import LOG_DIR as logs
+    files = sorted((f for f in logs.glob("claude_*.txt") if f.stat().st_mtime >= since - 5),
+                   key=lambda f: f.stat().st_mtime) if logs.exists() else []
+    parts = [f"mode: {'practice' if practice else 'real'}\nmodel: {MODEL}\n"]
+    worker = logs / "worker-0.log"
+    if worker.exists():
+        parts.append("=== worker-0.log (end) ===\n" + worker.read_text(encoding="utf-8", errors="replace")[-20000:])
+    for f in files[-5:]:
+        parts.append(f"=== {f.name} ===\n" + f.read_text(encoding="utf-8", errors="replace")[-200000:])
+    try:
+        request("/api/log", password, data="\n\n".join(parts).encode("utf-8"), timeout=60)
+    except (urllib.error.URLError, OSError):
+        pass
 
 
 def main() -> None:
@@ -245,7 +269,7 @@ def main() -> None:
     os.environ["APPLYPILOT_DIR"] = str(DATA)  # before importing applypilot, which reads it at import time
     DATA.mkdir(parents=True, exist_ok=True)
 
-    say("ApplyPilot Companion\n" + "=" * 20)
+    say(f"ApplyPilot Companion (version {VERSION})\n" + "=" * 32)
     cfg = load_config()
     password = get_password(cfg)
     self_update(password)
@@ -270,7 +294,7 @@ def main() -> None:
             pick = ask(f"Which job should it practice on? (1-{min(10, len(jobs))}, default 1):", "1")
             job = jobs[int(pick) - 1] if pick.isdigit() and 1 <= int(pick) <= min(10, len(jobs)) else jobs[0]
             say(f"\nOpening Chrome for: {job['title']} ({job['site']}). Nothing will be submitted.")
-            apply_now(1, min_score, practice=True, url=job["application_url"] or job["url"])
+            apply_now(1, min_score, practice=True, url=job["application_url"] or job["url"], password=password)
             say("\nPractice run finished. Nothing was submitted or marked as applied.")
         elif choice == "2":
             n = ask(f"How many jobs should it apply to? (1-{len(jobs)}, default 1):", "1")
@@ -279,7 +303,7 @@ def main() -> None:
             if confirm != "YES":
                 say("Cancelled.")
                 continue
-            apply_now(n, min_score, practice=False)
+            apply_now(n, min_score, practice=False, password=password)
             report(password, run_results())
             manifest = download_jobs(password)
         elif choice == "3":

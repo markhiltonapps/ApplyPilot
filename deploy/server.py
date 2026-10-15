@@ -781,6 +781,14 @@ class Handler(BaseHTTPRequestHandler):
             script = script.replace("__SERVER_URL__", f"https://{host}")
             return self._send(200, script.encode(), "text/x-python; charset=utf-8",
                               {"Content-Disposition": 'attachment; filename="ApplyPilot-Companion.py"'})
+        if path == "/api/logs":
+            names = sorted((DATA_DIR / "companion_logs").glob("*.txt"), reverse=True)
+            return self._send(200, "\n".join(n.name for n in names).encode(), "text/plain; charset=utf-8")
+        if path.startswith("/api/logs/"):
+            f = DATA_DIR / "companion_logs" / Path(path).name
+            if f.is_file():
+                return self._send(200, f.read_bytes(), "text/plain; charset=utf-8")
+            return self._send(404, b"Not found", "text/plain")
         if path == "/api/package.tar.gz":
             return self._send(200, package_tarball(), "application/gzip")
         if path == "/api/bundle.zip":
@@ -843,7 +851,7 @@ class Handler(BaseHTTPRequestHandler):
 
     def do_POST(self):
         path = urlparse(self.path).path
-        if path not in ("/run", "/setup", "/edit", "/mark", "/api/results"):
+        if path not in ("/run", "/setup", "/edit", "/mark", "/api/results", "/api/log"):
             return self._send(404, b"Not found", "text/plain")
         if not self._authorized():
             return
@@ -851,6 +859,16 @@ class Handler(BaseHTTPRequestHandler):
             return self._post_setup()
         if path == "/edit":
             return self._post_edit()
+        if path == "/api/log":
+            length = int(self.headers.get("Content-Length") or 0)
+            text = self.rfile.read(min(length, 2 * 1024 * 1024)).decode("utf-8", errors="replace")
+            logs = DATA_DIR / "companion_logs"
+            logs.mkdir(exist_ok=True)
+            name = datetime.now(UTC).strftime("%Y%m%d-%H%M%S") + ".txt"
+            (logs / name).write_text(text, encoding="utf-8")
+            for old in sorted(logs.glob("*.txt"))[:-30]:  # keep the latest 30
+                old.unlink(missing_ok=True)
+            return self._send(200, b'{"ok": true}', "application/json")
         if path == "/api/results":
             length = int(self.headers.get("Content-Length") or 0)
             try:
