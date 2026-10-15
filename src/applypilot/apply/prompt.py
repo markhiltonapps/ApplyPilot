@@ -185,7 +185,11 @@ Open-ended questions ("Why do you want this role?", "Tell us about yourself", "W
 
 EEO/demographics (gender, race, Hispanic/Latino, veteran, disability) -> use the answers in the APPLICANT PROFILE,
 picking the form option that matches. If the profile answer is a decline, or a question isn't covered there (e.g.
-sexual orientation), choose "Decline to self-identify" / "Prefer not to say"."""
+sexual orientation), choose "Decline to self-identify" / "Prefer not to say".
+These are often custom dropdowns where a click can silently fail or land on the wrong option. After answering
+each EEO question, take a fresh snapshot and confirm the field now SHOWS the profile answer; if it still shows a
+placeholder or a decline, select it again (type the option text and press Enter if clicking doesn't stick).
+Answer the disability question too when the form has one (it may be its own section at the bottom)."""
 
 
 def _build_hard_rules(profile: dict) -> str:
