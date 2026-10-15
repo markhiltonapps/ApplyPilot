@@ -34,9 +34,9 @@ import urllib.request
 import zipfile
 from pathlib import Path
 
-VERSION = "7"
+VERSION = "8"
 SERVER = "__SERVER_URL__"  # filled in by the server when you download this file
-USER = "applypilot"
+USER = "__SERVER_USER__"  # your site username, also filled in by the server
 MODEL = os.environ.get("APPLYPILOT_MODEL", "sonnet")  # Claude model used to fill in forms
 
 HOME = Path.home() / "ApplyPilotCompanion"
@@ -77,9 +77,13 @@ def save_config(cfg: dict) -> None:
     CONFIG.write_text(json.dumps(cfg, indent=2), encoding="utf-8")
 
 
+def site_user() -> str:
+    return load_config().get("username") or (USER if "__SERVER" not in USER else "applypilot")
+
+
 def request(path: str, password: str, data: bytes | None = None, timeout: int = 300) -> bytes:
     req = urllib.request.Request(SERVER.rstrip("/") + path, data=data)
-    token = base64.b64encode(f"{USER}:{password}".encode()).decode()
+    token = base64.b64encode(f"{site_user()}:{password}".encode()).decode()
     req.add_header("Authorization", f"Basic {token}")
     if data is not None:
         req.add_header("Content-Type", "application/json")
@@ -99,11 +103,15 @@ def get_password(cfg: dict) -> str:
         try:
             request("/status.json", password, timeout=30)
             cfg["password"] = password
+            cfg["username"] = site_user()
             save_config(cfg)
             return password
         except urllib.error.HTTPError as e:
             if e.code == 401:
-                say("That password didn't work. Try again.")
+                say("That username or password didn't work. Enter the ones you use to sign in to your site.")
+                current = USER if "__SERVER" not in USER else site_user()  # this file has the site's current one
+                cfg["username"] = ask(f"Username (press Enter for '{current}'):", current)
+                save_config(cfg)
                 password = ""
                 continue
             raise
@@ -445,7 +453,8 @@ def agent_main() -> None:
             offline_since = None
         except urllib.error.HTTPError as e:
             if e.code == 401:
-                say("Your site password changed. Run 'python ApplyPilot-Companion.py' to enter the new one.")
+                say("Your site username or password changed. Close this window, then run")
+                say("'python ApplyPilot-Companion.py' in PowerShell once to enter the new ones.")
                 time.sleep(60)
                 return
             reply = {}
@@ -597,6 +606,12 @@ def main() -> None:
     ensure_browser_tool()
     if agent_running():
         say(f"\nThe companion is already running in the background. Use the Auto-apply tab: {SERVER}/autoapply")
+        return
+    starter = HOME / "Start ApplyPilot Companion.cmd"
+    if background_installed() and starter.exists() and "--menu" not in sys.argv:
+        subprocess.Popen(["cmd", "/c", str(starter)], env={k: v for k, v in os.environ.items()
+                                                           if k != "APPLYPILOT_COMPANION_UPDATED"})
+        say(f"\nStarted the background companion again. Use the Auto-apply tab: {SERVER}/autoapply")
         return
     if not background_installed() and offer_background(SERVER):
         return

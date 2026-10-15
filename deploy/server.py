@@ -961,7 +961,7 @@ class Handler(BaseHTTPRequestHandler):
         if path == "/companion.py":
             host = self.headers.get("Host", "")
             script = (Path(__file__).parent / "companion.py").read_text(encoding="utf-8")
-            script = script.replace("__SERVER_URL__", f"https://{host}")
+            script = script.replace("__SERVER_URL__", f"https://{host}").replace("__SERVER_USER__", USER)
             return self._send(200, script.encode(), "text/x-python; charset=utf-8",
                               {"Content-Disposition": 'attachment; filename="ApplyPilot-Companion.py"'})
         if path == "/api/logs":
