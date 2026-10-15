@@ -151,6 +151,7 @@ _ALL_COLUMNS: dict[str, str] = {
     "description": "TEXT",
     "location": "TEXT",
     "site": "TEXT",
+    "company": "TEXT",
     "strategy": "TEXT",
     "discovered_at": "TEXT",
     # Enrichment

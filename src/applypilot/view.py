@@ -17,6 +17,7 @@ from pathlib import Path
 
 from rich.console import Console
 
+from applypilot.company import board_label, company_for
 from applypilot.config import APP_DIR, DB_PATH
 from applypilot.database import get_connection
 
@@ -94,7 +95,7 @@ def generate_dashboard(output_path: str | None = None) -> str:
 
     # All scored jobs (5+), ordered by score desc
     jobs = conn.execute("""
-        SELECT url, title, salary, description, location, site, strategy,
+        SELECT url, title, salary, description, location, site, company, strategy,
                full_description, application_url, detail_error,
                fit_score, score_reasoning, tailored_resume_path, cover_letter_path
         FROM jobs
@@ -185,9 +186,15 @@ def generate_dashboard(output_path: str | None = None) -> str:
         desc_len = len(j["full_description"] or "")
 
         meta_parts = []
-        meta_parts.append(
-            f'<span class="meta-tag site-tag" style="background:{site_color}33;color:{site_color}">{site}</span>'
-        )
+        who = company_for(j["company"], j["site"], j["application_url"])
+        if who:
+            meta_parts.append(f'<span class="meta-tag company">{escape(who)}</span>')
+        board = board_label(j["site"])
+        if board or not who:
+            meta_parts.append(
+                f'<span class="meta-tag site-tag" style="background:{site_color}33;color:{site_color}">'
+                f'{"via " + escape(board) if board else site}</span>'
+            )
         if salary:
             meta_parts.append(f'<span class="meta-tag salary">{salary}</span>')
         if location:
@@ -292,6 +299,7 @@ def generate_dashboard(output_path: str | None = None) -> str:
 
   .meta-row {{ display: flex; flex-wrap: wrap; gap: 0.4rem; margin-bottom: 0.4rem; }}
   .meta-tag {{ font-size: 0.72rem; padding: 0.15rem 0.5rem; border-radius: 4px; background: #334155; color: #94a3b8; }}
+  .meta-tag.company {{ background: #f1f5f9; color: #0f172a; font-weight: 600; font-size: 0.78rem; }}
   .meta-tag.salary {{ background: #064e3b; color: #6ee7b7; }}
   .meta-tag.location {{ background: #1e3a5f; color: #93c5fd; }}
 

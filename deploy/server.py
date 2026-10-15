@@ -41,6 +41,8 @@ import editor
 import setup_form
 import ui
 
+from applypilot.company import board_label, company_for
+
 DATA_DIR = Path(os.environ.setdefault("APPLYPILOT_DIR", "/data"))
 control = agent_control.Control(DATA_DIR / "autoapply_control.json")
 PORT = int(os.environ.get("PORT", "8080"))
@@ -439,10 +441,19 @@ def _dup_key(title: str | None, site: str | None) -> str:
     return f"{(title or '').strip().lower()}|{(site or '').strip().lower()}"
 
 
+def job_meta(j) -> str:
+    """'Apollo Io · Remote · via Indeed': who's hiring first, then where, then where the lead came from."""
+    who = company_for(j["company"], j["site"], j["application_url"])
+    board = board_label(j["site"])
+    parts = [f"<b>{html.escape(who)}</b>" if who else "", html.escape(j["location"] or ""),
+             f"via {html.escape(board)}" if board else ""]
+    return " &middot; ".join(p for p in parts if p)
+
+
 def _job_card(j, applied_keys: set[str]) -> str:
     score = j["fit_score"] or 0
     apply_url = j["application_url"] or j["url"] or ""
-    meta = " &middot; ".join(html.escape(x) for x in (j["site"], j["location"]) if x)
+    meta = job_meta(j)
     applied = bool(j["applied_at"])
     url_q = html.escape(j["url"], quote=True)
     actions = []
@@ -508,7 +519,7 @@ def _tailored_jobs() -> list:
             conn = sqlite3.connect(f"file:{db}?mode=ro", uri=True, timeout=5)
             conn.row_factory = sqlite3.Row
             jobs = conn.execute(
-                "SELECT title, site, location, url, application_url, fit_score, tailored_resume_path, "
+                "SELECT title, site, company, location, url, application_url, fit_score, tailored_resume_path, "
                 "cover_letter_path, applied_at, apply_status, apply_error FROM jobs WHERE tailored_resume_path IS NOT NULL "
                 "ORDER BY fit_score DESC, tailored_at DESC").fetchall()
             conn.close()
@@ -619,7 +630,7 @@ def apply_candidates() -> tuple[list, int]:
     conn = sqlite3.connect(f"file:{DATA_DIR / 'applypilot.db'}?mode=ro", uri=True, timeout=10)
     conn.row_factory = sqlite3.Row
     rows = conn.execute(
-        "SELECT url, title, site, location, application_url, fit_score, full_description, "
+        "SELECT url, title, site, company, location, application_url, fit_score, full_description, "
         "tailored_resume_path, cover_letter_path, COALESCE(apply_attempts, 0) AS apply_attempts "
         "FROM jobs WHERE tailored_resume_path IS NOT NULL AND applied_at IS NULL "
         "AND COALESCE(apply_status, '') NOT IN ('manual', 'expired') "
@@ -655,6 +666,7 @@ def apply_bundle() -> bytes:
         for r in rows:
             job = {k: r[k] for k in ("url", "title", "site", "location", "application_url", "fit_score",
                                      "full_description", "apply_attempts")}
+            job["company"] = company_for(r["company"], r["site"], r["application_url"])
             for key, col in (("tailored_resume", "tailored_resume_path"), ("cover_letter", "cover_letter_path")):
                 rel = _rel(r[col])
                 job[key] = rel or None
@@ -833,12 +845,13 @@ connects.</p></div></div>"""
         for j in jobs[:40]:
             score = j["fit_score"] or 0
             url = j["application_url"] or j["url"]
-            title = f'{j["title"]} at {j["site"]}' if j["site"] else j["title"]
+            who = company_for(j["company"], j["site"], j["application_url"])
+            title = f'{j["title"]} at {who}' if who else j["title"]
             hidden = (f'<input type="hidden" name="url" value="{esc(url, quote=True)}">'
                       f'<input type="hidden" name="title" value="{esc(title, quote=True)}">')
             rows.append(f"""<div class="aa-job"><span class="score{" mid" if score < 7 else ""}">{score}</span>
 <div class="t"><a href="{esc(j["url"] or url, quote=True)}" target="_blank" rel="noopener">{esc(j["title"])}</a>
-<div class="meta">{esc(j["site"] or "")}{" &middot; " + esc(j["location"]) if j["location"] else ""}</div></div>
+<div class="meta">{job_meta(j)}</div></div>
 <div class="aa-btns"><form method="post" action="/autoapply/start">{hidden}<input type="hidden" name="mode"
  value="practice"><button class="btn ghost sm"{dis}>Practice</button></form>
 <form method="post" action="/autoapply/start" onsubmit="return confirm('Submit an application to this job under your name?')">
@@ -1176,6 +1189,9 @@ class Handler(BaseHTTPRequestHandler):
 
 
 def main() -> None:
+    if (DATA_DIR / "applypilot.db").exists():  # bring the job table up to date (e.g. the company column)
+        from applypilot.database import init_db
+        init_db()
     problems = seed_config()
     state["config_problems"] = problems
     for p in problems:

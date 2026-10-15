@@ -496,7 +496,7 @@ def show_jobs(manifest: dict, min_score: int) -> list[dict]:
     jobs = [j for j in manifest["jobs"] if (j["fit_score"] or 0) >= min_score]
     say(f"\n{len(jobs)} job(s) auto-apply can handle (score {min_score}+). Best matches:")
     for i, j in enumerate(jobs[:10], 1):
-        say(f"  {i:2}. [{j['fit_score']}] {j['title'][:55]}  ({j['site']})")
+        say(f"  {i:2}. [{j['fit_score']}] {j['title'][:55]}  ({j.get('company') or j['site']})")
     if len(jobs) > 10:
         say(f"  ...and {len(jobs) - 10} more")
     skipped = manifest.get("needs_account", 0)
