@@ -113,7 +113,7 @@ def acquire_job(target_url: str | None = None, min_score: int = 7,
                 FROM jobs
                 WHERE (url = ? OR application_url = ? OR application_url LIKE ? OR url LIKE ?)
                   AND tailored_resume_path IS NOT NULL
-                  AND apply_status != 'in_progress'
+                  AND COALESCE(apply_status, '') != 'in_progress'
                 LIMIT 1
             """, (target_url, target_url, like, like)).fetchone()
         else:
@@ -286,7 +286,7 @@ def reset_failed() -> int:
                        apply_attempts = 0, agent_id = NULL
         WHERE apply_status = 'failed'
           OR (apply_status IS NOT NULL AND apply_status != 'applied'
-              AND apply_status != 'in_progress')
+              AND COALESCE(apply_status, '') != 'in_progress')
     """)
     conn.commit()
     return cursor.rowcount

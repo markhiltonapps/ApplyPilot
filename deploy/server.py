@@ -461,8 +461,9 @@ def _job_card(j, applied_keys: set[str]) -> str:
     dup = ""
     status = j["apply_status"] or ""
     if not applied and status and status not in ("applied", "applied_auto", "in_progress"):
-        reason = (j["apply_error"] or status).replace("_", " ")
-        dup = (f'<div class="muted small">Auto-apply couldn&rsquo;t finish this one ({html.escape(reason[:120])}). '
+        raw = j["apply_error"] or status
+        reason = FAILURE_WORDS.get(raw, raw.replace("_", " "))
+        dup = (f'<div class="muted small">Auto-apply couldn&rsquo;t finish this one: {html.escape(reason[:120])}. '
                f'Apply by hand.</div>')
     if not applied and not dup and needs_account(apply_url):
         dup = ('<div class="muted small">🔑 Apply by hand: this company\'s site needs an account, '
@@ -584,6 +585,23 @@ ACCOUNT_SITES = ("myworkdayjobs.com", "workday.com", "oraclecloud.com", "taleo.n
                  "paycomonline.net", "icims.com", "ultipro.com", "brassring.com")
 
 
+# Auto-apply outcomes that won't change on a retry, so the job is left for the person to do by hand.
+HAND_ONLY_REASONS = ("login_issue", "account_required", "sso_required", "expired", "already_applied",
+                     "not_a_job_application", "not_eligible_location", "not_eligible_salary",
+                     "not_eligible_work_auth", "captcha")
+FAILURE_WORDS = {
+    "login_issue": "the site needs an account",
+    "account_required": "the site needs an account",
+    "sso_required": "the site needs a Google or Microsoft sign-in",
+    "expired": "the posting has closed",
+    "captcha": "the site showed a CAPTCHA",
+    "already_applied": "the site says you already applied",
+    "not_eligible_location": "the role isn't open to your location",
+    "not_eligible_work_auth": "the role's work authorization doesn't fit",
+    "not_eligible_salary": "the salary range doesn't fit",
+}
+
+
 def needs_account(url: str | None) -> bool:
     return bool(url) and any(site in url.lower() for site in ACCOUNT_SITES)
 
@@ -600,10 +618,12 @@ def apply_bundle() -> bytes:
         "tailored_resume_path, cover_letter_path, COALESCE(apply_attempts, 0) AS apply_attempts "
         "FROM jobs WHERE tailored_resume_path IS NOT NULL AND applied_at IS NULL "
         "AND COALESCE(apply_status, '') NOT IN ('manual', 'expired') "
+        f"AND COALESCE(apply_error, '') NOT IN ({', '.join(repr(r) for r in HAND_ONLY_REASONS)}) "
         "ORDER BY fit_score DESC").fetchall()
     # Never queue the same posting twice: skip duplicates of anything applied to, and of each other.
     seen = {_dup_key(t, st) for t, st in conn.execute(
-        "SELECT title, site FROM jobs WHERE applied_at IS NOT NULL").fetchall()}
+        "SELECT title, site FROM jobs WHERE applied_at IS NOT NULL "
+        f"OR COALESCE(apply_error, '') IN ({', '.join(repr(r) for r in HAND_ONLY_REASONS)})").fetchall()}
     unique = []
     for r in rows:
         key = _dup_key(r["title"], r["site"])

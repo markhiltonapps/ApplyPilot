@@ -28,7 +28,7 @@ import urllib.request
 import zipfile
 from pathlib import Path
 
-VERSION = "3"
+VERSION = "4"
 SERVER = "__SERVER_URL__"  # filled in by the server when you download this file
 USER = "applypilot"
 MODEL = os.environ.get("APPLYPILOT_MODEL", "sonnet")  # Claude model used to fill in forms
@@ -296,6 +296,9 @@ def main() -> None:
             say(f"\nOpening Chrome for: {job['title']} ({job['site']}). Nothing will be submitted.")
             apply_now(1, min_score, practice=True, url=job["application_url"] or job["url"], password=password)
             say("\nPractice run finished. Nothing was submitted or marked as applied.")
+            # Share only problems (e.g. the site needs an account); a practice "applied" means nothing.
+            report(password, [r for r in run_results() if r["status"] != "applied"])
+            manifest = download_jobs(password)
         elif choice == "2":
             n = ask(f"How many jobs should it apply to? (1-{len(jobs)}, default 1):", "1")
             n = max(1, min(len(jobs), int(n))) if n.isdigit() else 1
