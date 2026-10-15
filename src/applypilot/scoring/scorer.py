@@ -20,7 +20,10 @@ log = logging.getLogger(__name__)
 
 # ── Scoring Prompt ────────────────────────────────────────────────────────
 
-SCORE_PROMPT = """You are a job fit evaluator. Given a candidate's resume and a job description, score how well the candidate fits the role.
+# Bump when the scoring instructions change, so the server re-scores jobs scored the old way.
+SCORE_PROMPT_VERSION = 2
+
+SCORE_PROMPT = """You are an experienced recruiter. Given a candidate's resume and a job description, score how well the candidate fits the role.
 
 SCORING CRITERIA:
 - 9-10: Perfect match. Candidate has direct experience in nearly all required skills and qualifications.
@@ -30,10 +33,13 @@ SCORING CRITERIA:
 - 1-2: Poor match. Completely different field or experience level.
 
 IMPORTANT FACTORS:
-- Weight technical skills heavily (programming languages, frameworks, tools)
-- Consider transferable experience (automation, scripting, API work)
-- Factor in the candidate's project experience
-- Be realistic about experience level vs. job requirements (years of experience, seniority)
+- Judge the candidate against what THIS kind of role needs. For hands-on engineering roles, weigh
+  programming languages, frameworks and tools. For leadership, solutions, consulting, presales,
+  product, advocacy or customer-facing roles, weigh domain expertise, scope of responsibility,
+  stakeholder and customer work, and comparable results instead.
+- Count transferable experience that the resume actually shows.
+- Be realistic about seniority: a role far below or far above the candidate's level is a weaker fit.
+- {targets}
 
 RESPOND IN EXACTLY THIS FORMAT (no other text):
 SCORE: [1-10]
@@ -70,6 +76,31 @@ def _parse_score_response(response: str) -> dict:
     return {"score": score, "keywords": keywords, "reasoning": reasoning}
 
 
+_TARGETS: str | None = None
+
+
+def _targets_line() -> str:
+    """One prompt line naming the roles the candidate is looking for (from profile and searches)."""
+    global _TARGETS
+    if _TARGETS is None:
+        roles: list[str] = []
+        try:
+            roles.append(load_profile().get("experience", {}).get("target_role", ""))
+        except (FileNotFoundError, ValueError):
+            pass
+        try:
+            from applypilot.config import load_search_config
+            roles += [q.get("query", "") for q in (load_search_config() or {}).get("queries", [])]
+        except Exception:  # noqa: BLE001 - targets are a hint; scoring works without them
+            pass
+        roles = list(dict.fromkeys(r.strip() for r in roles if r and r.strip()))
+        _TARGETS = ("The candidate is looking for roles like: " + "; ".join(roles[:15])
+                    + ". A job close to these and to their background should score higher than one "
+                    "that only overlaps on skills." if roles else
+                    "Consider whether the job matches the direction of the candidate's career.")
+    return _TARGETS
+
+
 def score_job(resume_text: str, job: dict) -> dict:
     """Score a single job against the resume.
 
@@ -88,7 +119,7 @@ def score_job(resume_text: str, job: dict) -> dict:
     )
 
     messages = [
-        {"role": "system", "content": SCORE_PROMPT},
+        {"role": "system", "content": SCORE_PROMPT.replace("{targets}", _targets_line())},
         {"role": "user", "content": f"RESUME:\n{resume_text}\n\n---\n\nJOB POSTING:\n{job_text}"},
     ]
 

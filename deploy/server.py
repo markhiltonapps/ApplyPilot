@@ -139,6 +139,15 @@ def requeue_failed_scores() -> None:
     try:
         conn = sqlite3.connect(db, timeout=10)
         n = conn.execute("UPDATE jobs SET fit_score = NULL, scored_at = NULL WHERE fit_score = 0").rowcount
+        # Scoring instructions changed since these were scored: score again (keeps jobs that
+        # already have a tailored resume).
+        from applypilot.scoring.scorer import SCORE_PROMPT_VERSION
+        marker = DATA_DIR / ".score_prompt_version"
+        if not marker.exists() or marker.read_text().strip() != str(SCORE_PROMPT_VERSION):
+            m = conn.execute("UPDATE jobs SET fit_score = NULL, scored_at = NULL "
+                             "WHERE fit_score IS NOT NULL AND tailored_resume_path IS NULL").rowcount
+            marker.write_text(str(SCORE_PROMPT_VERSION))
+            log(f"Scoring instructions updated; re-scoring {m} job(s)")
         conn.commit()
         conn.close()
         if n:
