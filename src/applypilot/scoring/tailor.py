@@ -107,8 +107,9 @@ BULLETS: Strong verb + what you built + quantified impact. Vary verbs (Built, De
 
 ## HARD RULES:
 - Do NOT invent work, companies, degrees, or certifications
+- TECHNICAL SKILLS may only list skills from the allowed list above; never add tools (like Office apps) that aren't there
 - Do NOT change real numbers ({metrics_str})
-- Preserved companies: {companies_str} -- names stay as-is
+- EXPERIENCE must include a role at EVERY one of these companies, with the company name written exactly as shown (you may shorten their bullets): {companies_str}
 - Preserved school: {school}
 - Must fit 1 page.
 

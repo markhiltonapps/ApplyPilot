@@ -11,8 +11,8 @@ normal  -- banned words = warnings only; fabrication/structure = errors (default
 lenient -- banned words ignored; only fabrication and required structure checked
 """
 
-import re
 import logging
+import re
 
 log = logging.getLogger(__name__)
 
@@ -126,10 +126,14 @@ def validate_json_fields(data: dict, profile: dict, mode: str = "normal") -> dic
     # Skills: check for fabrication (always enforced)
     if isinstance(data["skills"], dict):
         skills_text = " ".join(str(v) for v in data["skills"].values()).lower()
+        # The candidate's own skills are never fabrications (e.g. real certifications).
+        allowed_text = " ".join(_build_skills_set(profile))
         for fake in FABRICATION_WATCHLIST:
             if len(fake) <= 2:
                 continue
-            if fake in skills_text:
+            # Whole words only, so "guardrails" isn't "rails"; "certif" is a deliberate prefix.
+            pattern = r"(?<![a-z0-9])" + re.escape(fake) + ("" if fake == "certif" else r"(?![a-z0-9])")
+            if re.search(pattern, skills_text) and not re.search(pattern, allowed_text):
                 errors.append(f"Fabricated skill: '{fake}'")
 
     # Experience: preserved companies must be present (always enforced)

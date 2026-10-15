@@ -378,6 +378,23 @@ def _doc_href(path_str: str | None) -> str | None:
         return None
 
 
+def _review_note(tailored_path: str | None) -> str:
+    """What the quality judge flagged in a tailored resume, if anything (from its _REPORT.json)."""
+    if not tailored_path:
+        return ""
+    report = Path(tailored_path).with_name(Path(tailored_path).stem + "_REPORT.json")
+    try:
+        data = json.loads(report.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return ""
+    if data.get("status") != "approved_with_judge_warning":
+        return ""
+    issues = ((data.get("judge") or {}).get("issues") or "").strip()
+    if not issues or issues.lower() == "none":
+        return ""
+    return issues[:700] + ("…" if len(issues) > 700 else "")
+
+
 def ready_html() -> bytes:
     import sqlite3
     db = DATA_DIR / "applypilot.db"
@@ -416,11 +433,14 @@ def ready_html() -> bytes:
         if apply_url:
             actions.append(f'<a class="btn primary sm" href="{html.escape(apply_url)}" target="_blank" '
                            f'rel="noopener">Apply &rarr;</a>')
+        note = _review_note(j["tailored_resume_path"])
+        review = (f'<details class="review"><summary>⚠ Check this resume before sending</summary>'
+                  f'<p>{html.escape(note).replace(chr(10), "<br>")}</p></details>' if note else "")
         cards.append(f"""<div class="card job"><div class="job-top">
 <div class="score{'' if score >= 7 else ' mid'}">{score}</div><div>
 <a class="job-title" href="{html.escape(j['url'] or apply_url)}" target="_blank" rel="noopener">
 {html.escape(j['title'] or 'Untitled')}</a><div class="meta">{meta}</div></div></div>
-<div class="row" style="gap:8px">{''.join(actions)}</div></div>""")
+{review}<div class="row" style="gap:8px">{''.join(actions)}</div></div>""")
     body = f"""<h1>Ready to apply</h1>
 <p class="sub">{len(jobs)} job{'s' if len(jobs) != 1 else ''} with a tailored resume, best match first. Download the
 resume, then tap Apply.</p>
