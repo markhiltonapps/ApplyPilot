@@ -547,7 +547,7 @@ def _job_card(j, applied_keys: set[str]) -> str:
               if note else "")
     dup = ""
     status = j["apply_status"] or ""
-    if not applied and status and status not in ("applied", "applied_auto", "in_progress"):
+    if not applied and status and status not in ("applied", "applied_auto", "in_progress", "skipped"):
         raw = j["apply_error"] or status
         reason = FAILURE_WORDS.get(raw, raw.replace("_", " "))
         dup = (f'<div class="muted small">Auto-apply couldn&rsquo;t finish this one: {html.escape(reason[:120])}. '
@@ -573,10 +573,15 @@ def _job_card(j, applied_keys: set[str]) -> str:
         mark = (f'<form method="post" action="/mark" class="mark"><input type="hidden" name="url" value="{url_q}">'
                 f'<span class="applied-tag">✓ Applied {html.escape(when)}{how}</span>'
                 f'<button class="linkbtn" name="action" value="undo">Undo</button></form>')
+    elif status == "skipped":
+        mark = (f'<form method="post" action="/mark" class="mark"><input type="hidden" name="url" value="{url_q}">'
+                f'<span class="muted small">Hidden: auto-apply skips it.</span> '
+                f'<button class="linkbtn" name="action" value="unskip">Bring it back</button></form>')
     else:
         mark = (f'<form method="post" action="/mark" class="mark"><input type="hidden" name="url" value="{url_q}">'
-                f'<button class="btn ghost sm check" name="action" value="applied">☐ I applied to this job</button>'
-                f'</form>')
+                f'<button class="btn ghost sm check" name="action" value="applied">☐ I applied to this job</button> '
+                f'<button class="linkbtn" name="action" value="skip" title="Hide it and never auto-apply">'
+                f'✕ Not for me</button></form>')
     return f"""<div class="card job{' done' if applied else ''}"><div class="job-top">
 <div class="score{'' if score >= 7 else ' mid'}">{score}</div><div>
 <a class="job-title" href="{html.escape(j['url'] or apply_url)}" target="_blank" rel="noopener">
@@ -658,15 +663,23 @@ def ready_html(view: str = "") -> bytes:
     applied_keys = {_dup_key(j) for j in done}
     # The same posting found on two boards is listed once (jobs come best match first, so the best copy stays).
     todo, seen = [], set()
+    hidden = [j for j in jobs if not j["applied_at"] and (j["apply_status"] or "") == "skipped"]
     for j in jobs:
-        if not j["applied_at"] and _dup_key(j) not in seen:
+        if not j["applied_at"] and (j["apply_status"] or "") != "skipped" and _dup_key(j) not in seen:
             seen.add(_dup_key(j))
             todo.append(j)
     mine = [j for j in todo if needs_you(j) and _dup_key(j) not in applied_keys]
     tabs = ai_banner()
-    tabs += (f'<div class="tabs"><a href="/ready"{" class=on" if view != "needs" else ""}>All to apply '
+    tabs += (f'<div class="tabs"><a href="/ready"{" class=on" if view not in ("needs", "hidden") else ""}>All to apply '
             f'<span>{len(todo)}</span></a><a href="/ready?view=needs"{" class=on" if view == "needs" else ""}>'
             f'Needs you <span>{len(mine)}</span></a></div>')
+    if view == "hidden":
+        cards = "".join(_job_card(j, applied_keys) for j in hidden) or (
+            '<div class="card empty"><h2>No hidden jobs</h2></div>')
+        body = f"""<h1>Ready to apply</h1>{tabs}
+<p class="sub">{len(hidden)} job{"s" if len(hidden) != 1 else ""} you marked <b>Not for me</b>. Auto-apply skips
+these. Click <b>Bring it back</b> to put one back on the list.</p><div class="stack">{cards}</div>"""
+        return page("Hidden jobs", body, "ready", READY_CSS)
     if view == "needs":
         cards = "".join(_job_card(j, applied_keys) for j in mine) or (
             '<div class="card empty"><div class="big">✅</div><h2>Nothing waiting on you</h2>'
@@ -682,6 +695,9 @@ resume and cover letter are already written: click <b>Apply</b>, fill in the for
         '<p class="muted">New matches appear here after each search.</p></div>')
     done_html = (f'<a class="btn ghost" style="margin-top:18px;display:flex" href="/applied">'
                  f'See your {len(done)} applied job{"s" if len(done) != 1 else ""} &rarr;</a>' if done else "")
+    if hidden:
+        done_html += (f'<p class="muted small" style="margin-top:12px"><a href="/ready?view=hidden">{len(hidden)} '
+                      f'job{"s" if len(hidden) != 1 else ""} hidden as Not for me</a></p>')
     body = f"""<h1>Ready to apply</h1>
 <p class="sub">{len(todo)} to apply, best match first{f", {len(done)} applied" if done else ""}. These are all
 jobs scoring {setup_form.saved_min_score(DATA_DIR)} or more ({sum(1 for j in todo if (j["fit_score"] or 0) >= 7)} of
@@ -779,7 +795,7 @@ def apply_candidates() -> tuple[list, int]:
         "tailored_resume_path, cover_letter_path, apply_error, COALESCE(apply_attempts, 0) AS apply_attempts "
         "FROM jobs WHERE tailored_resume_path IS NOT NULL AND applied_at IS NULL "
         f"AND (fit_score IS NULL OR fit_score >= {int(setup_form.saved_min_score(DATA_DIR))}) "
-        "AND COALESCE(apply_status, '') NOT IN ('manual', 'expired') "
+        "AND COALESCE(apply_status, '') NOT IN ('manual', 'expired', 'skipped') "
         f"AND COALESCE(apply_error, '') NOT IN ({', '.join(repr(r) for r in HAND_ONLY_REASONS)}) "
         "ORDER BY fit_score DESC").fetchall()
     # Never queue the same posting twice: skip duplicates of anything applied to, and of each other.
@@ -872,6 +888,21 @@ def mark_applied(url: str, applied: bool, status: str = "applied", when: str | N
     except sqlite3.Error as e:
         log(f"Could not update applied state: {e}")
         return False
+
+
+def set_skipped(url: str, skipped: bool) -> None:
+    """Hide a job from Ready to apply and from auto-apply ("Not for me"), or bring it back."""
+    import sqlite3
+    try:
+        conn = sqlite3.connect(DATA_DIR / "applypilot.db", timeout=10)
+        if skipped:
+            conn.execute("UPDATE jobs SET apply_status = 'skipped' WHERE url = ? AND applied_at IS NULL", (url,))
+        else:
+            conn.execute("UPDATE jobs SET apply_status = NULL WHERE url = ? AND apply_status = 'skipped'", (url,))
+        conn.commit()
+        conn.close()
+    except sqlite3.Error as e:
+        log(f"Could not update skipped state: {e}")
 
 
 def _since(ts: float | None) -> str:
@@ -1246,9 +1277,14 @@ class Handler(BaseHTTPRequestHandler):
             length = int(self.headers.get("Content-Length") or 0)
             form = parse_qs(self.rfile.read(min(length, 65536)).decode("utf-8", errors="replace"))
             url = form.get("url", [""])[0]
-            mark_applied(url, form.get("action", ["applied"])[0] == "applied")
+            action = form.get("action", ["applied"])[0]
+            if action in ("skip", "unskip"):
+                set_skipped(url, action == "skip")
+            else:
+                mark_applied(url, action == "applied")
             referer = self.headers.get("Referer") or ""
-            back = "/applied" if "/applied" in referer else ("/ready?view=needs" if "view=needs" in referer else "/ready")
+            back = ("/applied" if "/applied" in referer else "/ready?view=needs" if "view=needs" in referer
+                    else "/ready?view=hidden" if "view=hidden" in referer else "/ready")
             return self._send(303, b"", "text/plain", {"Location": back})
         if _run_lock.locked():
             msg = "Pipeline is already running."

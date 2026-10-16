@@ -111,6 +111,16 @@ def _targets_line() -> str:
                     + ". A job close to these and to their background should score higher than one "
                     "that only overlaps on skills." if roles else
                     "Consider whether the job matches the direction of the candidate's career.")
+        try:
+            personal = load_profile().get("personal", {})
+        except (FileNotFoundError, ValueError):
+            personal = {}
+        home = ", ".join(x for x in (personal.get("city"), personal.get("province_state"),
+                                     personal.get("country")) if x)
+        if home:
+            _TARGETS += (f"\n- The candidate lives in {home} and will not relocate unless the job says relocation is "
+                         "paid. A remote job open only to residents of particular states or regions that don't "
+                         "include theirs, or an onsite or hybrid job far from where they live, scores 3 or lower.")
         if ai_only():
             _TARGETS += ("\n- The candidate ONLY wants roles where AI (machine learning, generative AI, LLMs, AI agents "
                          "or AI products) is central to the day-to-day work. If AI appears only in the company "
