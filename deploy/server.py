@@ -168,6 +168,15 @@ def requeue_failed_scores() -> None:
                              "WHERE fit_score IS NOT NULL AND applied_at IS NULL").rowcount
             marker.write_text(version)
             log(f"Resume or scoring preferences changed; re-scoring {m} job(s)")
+        # One-time: re-score the jobs on Ready to apply under the rule about where the candidate lives,
+        # so remote jobs limited to other states drop off the list without hiding each by hand.
+        location_marker = DATA_DIR / ".rescore_location_v1"
+        if not location_marker.exists():
+            r = conn.execute("UPDATE jobs SET fit_score = NULL, scored_at = NULL WHERE applied_at IS NULL "
+                             "AND fit_score >= ? AND COALESCE(apply_status, '') != 'skipped'",
+                             (int(setup_form.saved_min_score(DATA_DIR)),)).rowcount
+            location_marker.write_text("1")
+            log(f"Re-checking {r} good-fit job(s) for location limits")
         # One-time: tailoring attempts that failed because replies were cut off (output limit,
         # then OpenRouter's default reasoning) shouldn't count toward the 5-attempt cap.
         reset_marker = DATA_DIR / ".tailor_attempts_reset_v1"
