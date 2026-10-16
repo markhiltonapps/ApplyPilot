@@ -177,6 +177,21 @@ def requeue_failed_scores() -> None:
                              (int(setup_form.saved_min_score(DATA_DIR)),)).rowcount
             location_marker.write_text("1")
             log(f"Re-checking {r} good-fit job(s) for location limits")
+        # One-time: rewrite the resumes not yet used under the tighter length rules (two pages, fewer and
+        # shorter bullets). Cover letters are kept; resumes edited by hand are kept.
+        length_marker = DATA_DIR / ".resume_length_v1"
+        if not length_marker.exists():
+            r = 0
+            for url, path, when in conn.execute(
+                    "SELECT url, tailored_resume_path, tailored_at FROM jobs "
+                    "WHERE tailored_resume_path IS NOT NULL AND applied_at IS NULL").fetchall():
+                if _edited_by_hand(path, when):
+                    continue
+                conn.execute("UPDATE jobs SET tailored_resume_path = NULL, tailored_at = NULL, tailor_attempts = 0 "
+                             "WHERE url = ?", (url,))
+                r += 1
+            length_marker.write_text("1")
+            log(f"Rewriting {r} resume(s) to fit two pages")
         # One-time: tailoring attempts that failed because replies were cut off (output limit,
         # then OpenRouter's default reasoning) shouldn't count toward the 5-attempt cap.
         reset_marker = DATA_DIR / ".tailor_attempts_reset_v1"

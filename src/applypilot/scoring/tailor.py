@@ -87,15 +87,22 @@ Do not add any skill, tool, language or framework that isn't in this list, not e
 
 TITLE: Match the target role. Keep seniority (Senior/Lead/Staff). Drop company suffixes and team names.
 
-SUMMARY: Rewrite from scratch. Lead with the 1-2 skills that matter most for THIS role. Sound like someone who's done this job.
+SUMMARY: Rewrite from scratch, at most 3 sentences (about 60 words). Lead with the 1-2 things that matter most for THIS role and the strongest proof of them. Sound like someone who's done this job.
 
-SKILLS: Use the skill groups and wording from the base resume. Reorder so the job's must-haves appear first.
+SKILLS: Use the skill groups and wording from the base resume. Keep the 5-6 groups that matter most for this job and drop the rest. Reorder so the job's must-haves appear first.
 
 Reframe EVERY bullet for this role. Same real work, different angle. Every bullet must be reworded. Never copy verbatim.
 
-PROJECTS: Reorder by relevance. Drop irrelevant projects entirely.
+PROJECTS: At most 3, each with ONE bullet, and only ones that add something the experience section doesn't already say. Drop the rest.
 
-BULLETS: Strong verb + what you built + quantified impact. Vary verbs (Built, Designed, Implemented, Reduced, Automated, Deployed, Operated, Optimized). Most relevant first. Max 4 per section.
+BULLETS: Strong verb + what you did + quantified result. One idea per bullet, at most 25 words. Vary verbs. Most relevant first.
+
+LENGTH: The whole resume must fit on 2 pages, about 700 words. A hiring manager reads the first page closely and skims the rest, so spend words where this job cares most:
+- The 2-3 roles most relevant to this job: 3-5 bullets each.
+- Other roles from the last 15 years: 1-2 bullets.
+- Older roles: no bullets (title, company and dates only).
+- At most 18 bullets in EXPERIENCE in total.
+Cutting a weaker bullet is better than shortening a strong one until it says nothing.
 
 ## VOICE:
 - Write like a real practitioner of this person's kind of work (not necessarily an engineer). Short, direct.
@@ -116,7 +123,7 @@ BULLETS: Strong verb + what you built + quantified impact. Vary verbs (Built, De
 - EXPERIENCE must include a role at EVERY one of these companies, with the company name written exactly as shown (you may shorten their bullets): {companies_str}
 - Preserved school: {school}
 - Keep each role separate: same title, company and dates as the original. NEVER merge roles, rename them, or change dates. To save space, give older roles fewer bullets (an old role can be a single line with no bullets) instead of combining them.
-- At most 2 pages.
+- At most 2 pages (see LENGTH).
 
 ## OUTPUT: Return ONLY valid JSON. No markdown fences. No commentary. No "here is" preamble.
 
@@ -264,6 +271,8 @@ def assemble_resume_text(data: dict, profile: dict) -> str:
         lines.append(" | ".join(contact_parts))
     lines.append("")
 
+    data = _fit_budget(data)
+
     # Summary
     lines.append("SUMMARY")
     lines.append(sanitize_text(data["summary"]))
@@ -301,6 +310,30 @@ def assemble_resume_text(data: dict, profile: dict) -> str:
     lines.append(sanitize_text(str(data.get("education", ""))))
 
     return "\n".join(lines)
+
+
+MAX_BULLETS_PER_ROLE = 5
+MAX_EXPERIENCE_BULLETS = 18
+MAX_PROJECTS = 3
+MAX_SKILL_GROUPS = 6
+
+
+def _fit_budget(data: dict) -> dict:
+    """Hold the resume to the length rules even when the model runs long.
+
+    Caps bullets per role and in total (older roles lose bullets first, see role_to_trim), projects (one bullet
+    each) and skill groups.
+    """
+    data = dict(data)
+    roles = [dict(e, bullets=list(e.get("bullets") or [])[:MAX_BULLETS_PER_ROLE]) for e in data.get("experience", [])]
+    while sum(len(e["bullets"]) for e in roles) > MAX_EXPERIENCE_BULLETS:
+        from applypilot.scoring.pdf import role_to_trim
+        roles[role_to_trim([len(e["bullets"]) for e in roles])]["bullets"].pop()
+    data["experience"] = roles
+    data["projects"] = [dict(e, bullets=list(e.get("bullets") or [])[:1]) for e in data.get("projects", [])][:MAX_PROJECTS]
+    if isinstance(data.get("skills"), dict) and len(data["skills"]) > MAX_SKILL_GROUPS:
+        data["skills"] = dict(list(data["skills"].items())[:MAX_SKILL_GROUPS])
+    return data
 
 
 # ── LLM Judge ────────────────────────────────────────────────────────────
@@ -575,8 +608,9 @@ def run_tailoring(min_score: int = 7, limit: int = 20,
             pdf_path = None
             if report["status"] in ("approved", "approved_with_judge_warning"):
                 try:
-                    from applypilot.scoring.pdf import convert_to_pdf
+                    from applypilot.scoring.pdf import convert_to_pdf, fit_to_pages
                     pdf_path = str(convert_to_pdf(txt_path))
+                    fit_to_pages(txt_path, max_pages=2)
                 except Exception:
                     log.debug("PDF generation failed for %s", txt_path, exc_info=True)
 

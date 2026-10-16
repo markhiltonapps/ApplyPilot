@@ -459,6 +459,87 @@ def convert_to_pdf(
     return out
 
 
+def _page_count(pdf: Path) -> int:
+    from pypdf import PdfReader
+    return len(PdfReader(str(pdf)).pages)
+
+
+def role_to_trim(counts: list[int], keep_top: int = 3) -> int | None:
+    """Which experience entry should lose a bullet: the oldest beyond the first keep_top that still has one
+    (the first of those keeps one), otherwise the one with the most bullets (the later one on ties) while it
+    has more than one."""
+    older = [i for i in range(keep_top, len(counts)) if counts[i] > (1 if i == keep_top else 0)]
+    if older:
+        return older[-1]
+    if counts and max(counts) > 1:
+        most = max(counts)
+        return max(i for i, c in enumerate(counts) if c == most)
+    return None
+
+
+def _drop_one(text: str) -> str | None:
+    """Text with one less line of detail, or None when nothing sensible is left to cut.
+
+    Cuts whole projects beyond the first, then experience bullets as role_to_trim picks them.
+    """
+    lines = text.split("\n")
+    sections: list[tuple[str, int, int]] = []  # (name, start, end) of each ALL-CAPS section body
+    for i, line in enumerate(lines):
+        s = line.strip()
+        if s and s == s.upper() and len(s) > 3 and not s.startswith(("-", "\u2022")) and any(c.isalpha() for c in s):
+            if sections:
+                sections[-1] = (sections[-1][0], sections[-1][1], i)
+            sections.append((s, i + 1, len(lines)))
+
+    def entries(start: int, end: int) -> list[tuple[int, int, list[int]]]:
+        out, cur = [], None
+        for i in range(start, end):
+            s = lines[i].strip()
+            if not s:
+                continue
+            if s.startswith(("- ", "\u2022")):
+                if cur:
+                    cur[2].append(i)
+            elif cur is None or cur[2]:
+                cur = [i, i, []]
+                out.append(cur)
+            cur[1] = i
+        return [tuple(e) for e in out]
+
+    for name, start, end in sections:
+        if name == "PROJECTS":
+            projs = entries(start, end)
+            for first, last, bullets in reversed(projs[1:]):
+                del lines[first:last + 1]
+                return "\n".join(lines)
+    for name, start, end in sections:
+        if name == "EXPERIENCE":
+            roles = entries(start, end)
+            victim = role_to_trim([len(b) for _, _, b in roles])
+            if victim is None:
+                return None
+            del lines[roles[victim][2][-1]]
+            return "\n".join(lines)
+    return None
+
+
+def fit_to_pages(text_path: Path, max_pages: int = 2, max_cuts: int = 40) -> int:
+    """Trim a resume until its PDF fits in max_pages, re-rendering after each cut. Returns cuts made."""
+    text_path = Path(text_path)
+    pdf = text_path.with_suffix(".pdf")
+    cuts = 0
+    while pdf.exists() and _page_count(pdf) > max_pages and cuts < max_cuts:
+        shorter = _drop_one(text_path.read_text(encoding="utf-8"))
+        if shorter is None:
+            break
+        text_path.write_text(shorter, encoding="utf-8")
+        convert_to_pdf(text_path)
+        cuts += 1
+    if cuts:
+        log.info("Trimmed %s by %d line(s) to fit %d pages", text_path.name, cuts, max_pages)
+    return cuts
+
+
 def batch_convert(limit: int = 50) -> int:
     """Convert .txt files in TAILORED_DIR that don't have corresponding PDFs.
 
