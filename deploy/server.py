@@ -666,6 +666,23 @@ FAILURE_WORDS = {
 }
 
 
+# Auto-apply reasons that won't change on another try (the agent words them freely, so match on keywords).
+PERMANENT_FAILURE_WORDS = ("contract", "1099", "freelance", "part_time", "part-time", "closed", "expired",
+                           "no_longer", "not_eligible", "eligib", "authorization", "clearance", "citizenship",
+                           "relocat", "account", "login", "sign_in", "sso", "already_applied", "duplicate",
+                           "not_a_job", "no_job_url", "no job url")
+
+
+def worth_retrying(error: str | None, attempts: int | None) -> bool:
+    """Whether auto-apply should try a job again: not after a permanent reason, and at most twice in all."""
+    if not error:
+        return True
+    if (attempts or 0) >= 2:
+        return False
+    low = error.lower()
+    return not any(w in low for w in PERMANENT_FAILURE_WORDS)
+
+
 def needs_account(url: str | None) -> bool:
     return bool(url) and any(site in url.lower() for site in ACCOUNT_SITES)
 
@@ -679,7 +696,7 @@ def apply_candidates() -> tuple[list, int]:
     conn.row_factory = sqlite3.Row
     rows = conn.execute(
         "SELECT url, title, site, company, location, application_url, fit_score, full_description, "
-        "tailored_resume_path, cover_letter_path, COALESCE(apply_attempts, 0) AS apply_attempts "
+        "tailored_resume_path, cover_letter_path, apply_error, COALESCE(apply_attempts, 0) AS apply_attempts "
         "FROM jobs WHERE tailored_resume_path IS NOT NULL AND applied_at IS NULL "
         f"AND (fit_score IS NULL OR fit_score >= {int(setup_form.saved_min_score(DATA_DIR))}) "
         "AND COALESCE(apply_status, '') NOT IN ('manual', 'expired') "
@@ -695,7 +712,8 @@ def apply_candidates() -> tuple[list, int]:
         if key not in seen:
             seen.add(key)
             unique.append(r)
-    rows = [r for r in unique if not needs_account(r["application_url"] or r["url"])]
+    rows = [r for r in unique if not needs_account(r["application_url"] or r["url"])
+            and worth_retrying(r["apply_error"], r["apply_attempts"])]
     conn.close()
     return rows, len(unique) - len(rows)
 
@@ -808,9 +826,10 @@ def run_summary(mode: str, results: list[dict], stopped: bool) -> tuple[str, boo
         parts.append(f"Applied to {len(done)} job{'s' if len(done) != 1 else ''}; "
                      f"{'they are' if len(done) != 1 else 'it is'} on the Applied tab.")
     if other:
-        reasons = sorted({why(r) for r in other})
-        parts.append(f"{len(other)} couldn't be finished ({'; '.join(reasons)[:200]}). They stay on Ready to apply "
-                     "to do by hand.")
+        from collections import Counter
+        counts = Counter(why(r).strip() for r in other).most_common()
+        reasons = "; ".join(f"{reason} ({n})" if n > 1 else reason for reason, n in counts)
+        parts.append(f"{len(other)} couldn't be finished: {reasons}. They stay on Ready to apply to do by hand.")
     if stopped:
         parts.append("You stopped the run.")
     return (" ".join(parts) or "Nothing was submitted."), bool(done)

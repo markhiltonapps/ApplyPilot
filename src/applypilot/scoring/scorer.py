@@ -40,6 +40,8 @@ IMPORTANT FACTORS:
   stakeholder and customer work, and comparable results instead.
 - Count transferable experience that the resume actually shows.
 - Be realistic about seniority: a role far below or far above the candidate's level is a weaker fit.
+- The candidate wants full-time, salaried employment. Contract, 1099, freelance, temporary or part-time roles
+  score 3 or lower however well they fit.
 - {targets}
 
 RESPOND IN EXACTLY THIS FORMAT (no other text):

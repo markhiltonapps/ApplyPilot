@@ -341,7 +341,7 @@ def write_config(data_dir: Path, f: dict[str, str]) -> None:
             "preferred_name": f.get("preferred_name", ""),
             "email": f["email"],
             "phone": f.get("phone", ""),
-            "address": "",
+            "address": f.get("address", ""),
             "city": f["city"],
             "province_state": f.get("state", ""),
             "country": f["country"],
@@ -547,6 +547,7 @@ document.querySelectorAll('.pk').forEach(function(d){{d.style.display=d.dataset.
 {text("full_name", "Full name", req=True)}
 {text("email", "Email", "email", req=True)}
 {text("phone", "Phone")}
+{text("address", "Street address", hint="Optional. Some applications require it.")}
 <div class="row"><div>{text("city", "City", req=True)}</div><div>{text("state", "State / province")}</div></div>
 <div class="row"><div>{text("country", "Country", default="United States", req=True)}</div>
 <div>{text("postal_code", "ZIP / postal code")}</div></div>
