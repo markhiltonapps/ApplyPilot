@@ -13,6 +13,7 @@ placeholders replaced from the user's search configuration.
 """
 
 import json
+import os
 import logging
 import re
 import sqlite3
@@ -867,7 +868,9 @@ def _run_one_site(name: str, url: str) -> dict:
     _captcha_signals = ["captcha", "are you a human", "verify you", "unusual requests",
                         "access denied", "please verify", "bot detection"]
     _is_captcha = any(s in full_html.lower() for s in _captcha_signals) if full_html else False
-    if len(cleaned_check) < 5000 and full_html and not _is_captcha:
+    # A visible browser needs a display; on a server (no DISPLAY) the launch fails and leaves processes behind.
+    has_display = sys.platform != "linux" or bool(os.environ.get("DISPLAY") or os.environ.get("WAYLAND_DISPLAY"))
+    if len(cleaned_check) < 5000 and full_html and not _is_captcha and has_display:
         log.info("Cleaned HTML only %s chars -- retrying headful...", f"{len(cleaned_check):,}")
         intel = collect_page_intelligence(url, headless=False)
         collect_time = time.time() - t0
