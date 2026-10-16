@@ -359,6 +359,18 @@ def _until(iso: str | None) -> str:
     return f"in about {mins // 60} h {mins % 60} min" if mins >= 60 else f"in about {max(mins, 1)} min"
 
 
+def ai_banner() -> str:
+    """A warning when the AI service is refusing requests: nothing gets scored or written until it's fixed."""
+    problem = setup_form.ai_problem(DATA_DIR)
+    if not problem:
+        return ""
+    return (f'<div class="card" style="border-color:#ef444466;background:#ef44441a;margin-bottom:16px">'
+            f'<b style="color:#fca5a5">The AI service isn&rsquo;t working.</b> {html.escape(problem)} Until it&rsquo;s fixed, '
+            'no jobs are scored and no resumes are written. Fix it at <a href="https://openrouter.ai/settings/credits" '
+            'target="_blank" rel="noopener">openrouter.ai</a> (Credits, or Keys for the spending limit), then open '
+            '<a href="/setup">Setup</a> and click <b>Save</b> to restart.</div>')
+
+
 def status_html() -> bytes:
     with _state_lock:
         s = dict(state)
@@ -399,6 +411,7 @@ def status_html() -> bytes:
     ready_label = f"Ready to apply ({c['tailored']})" if c["tailored"] else "Ready to apply"
     body = f"""<h1>Status</h1>
 <p class="sub">ApplyPilot searches, scores and writes your applications automatically every 12 hours.</p>
+{ai_banner()}
 <div class="card status"><span class="dot {dot}"></span><div><div class="head">{headline}</div>
 <p class="muted small">{detail}</p></div></div>
 <div class="tiles">{tiles}</div>
@@ -626,7 +639,7 @@ def ready_html(view: str = "") -> bytes:
         note = (f"{c['good_fit']} good fits found so far. Their resumes are being written now."
                 if c["good_fit"] else f"Jobs scoring {setup_form.saved_min_score(DATA_DIR)} or more will show up here "
                 "with their own resume and cover letter.")
-        body = f"""<h1>Ready to apply</h1>
+        body = f"""<h1>Ready to apply</h1>{ai_banner()}
 <div class="card empty"><div class="big">📝</div><h2>Nothing ready yet</h2>
 <p class="muted">{note}</p><a class="btn ghost" href="/status">Check progress</a></div>"""
         return page("Ready to apply", body, "ready")
@@ -635,7 +648,8 @@ def ready_html(view: str = "") -> bytes:
     done = sorted((j for j in jobs if j["applied_at"]), key=lambda j: j["applied_at"], reverse=True)
     applied_keys = {_dup_key(j["title"], j["site"]) for j in done}
     mine = [j for j in todo if needs_you(j) and _dup_key(j["title"], j["site"]) not in applied_keys]
-    tabs = (f'<div class="tabs"><a href="/ready"{" class=on" if view != "needs" else ""}>All to apply '
+    tabs = ai_banner()
+    tabs += (f'<div class="tabs"><a href="/ready"{" class=on" if view != "needs" else ""}>All to apply '
             f'<span>{len(todo)}</span></a><a href="/ready?view=needs"{" class=on" if view == "needs" else ""}>'
             f'Needs you <span>{len(mine)}</span></a></div>')
     if view == "needs":

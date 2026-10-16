@@ -163,6 +163,45 @@ def _check_openrouter_key(key: str) -> str | None:
     return None
 
 
+_ai_check: dict = {"at": 0.0, "problem": None}
+
+
+def ai_problem(data_dir: Path) -> str | None:
+    """Why the AI service would refuse requests right now (spending limit, no credit, bad key), if it would.
+
+    Checked against OpenRouter at most every 5 minutes. Returns None when it looks fine or can't be checked.
+    """
+    import time
+
+    import httpx
+    if time.time() - _ai_check["at"] < 300:
+        return _ai_check["problem"]
+    problem = None
+    env = _env_values(data_dir)
+    key = env.get("LLM_API_KEY", "")
+    if env.get("LLM_URL", "").startswith(OPENROUTER_URL) and key:
+        headers = {"Authorization": f"Bearer {key}"}
+        try:
+            r = httpx.get(f"{OPENROUTER_URL}/key", headers=headers, timeout=10)
+            if r.status_code in (401, 403):
+                problem = "OpenRouter is rejecting your API key (it may have been deleted or disabled)."
+            elif r.status_code == 200:
+                d = r.json().get("data") or {}
+                if d.get("limit_remaining") is not None and float(d["limit_remaining"]) <= 0:
+                    problem = (f"Your OpenRouter key has reached its spending limit (${d.get('limit')}). Raise the "
+                               "limit on that key, or create a new key.")
+                else:
+                    c = httpx.get(f"{OPENROUTER_URL}/credits", headers=headers, timeout=10)
+                    if c.status_code == 200:
+                        cd = c.json().get("data") or {}
+                        if float(cd.get("total_credits") or 0) - float(cd.get("total_usage") or 0) <= 0:
+                            problem = "Your OpenRouter account is out of credit."
+        except (httpx.HTTPError, ValueError, TypeError):
+            problem = None
+    _ai_check.update(at=time.time(), problem=problem)
+    return problem
+
+
 def has_llm_key(data_dir: Path, environ: dict) -> bool:
     keys = ("GEMINI_API_KEY", "OPENAI_API_KEY", "LLM_URL")
     return any(environ.get(k) for k in keys) or any(k in _env_values(data_dir) for k in keys)
