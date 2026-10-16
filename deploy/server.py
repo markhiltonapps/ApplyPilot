@@ -26,6 +26,7 @@ import html
 import json
 import mimetypes
 import os
+import re
 import shlex
 import subprocess
 import sys
@@ -500,9 +501,18 @@ def edit_html(doc: Path, rel: str, message: str = "") -> bytes:
     return page(f"Edit {kind}", editor.page_body(doc, rel, title, kind, message), "ready")
 
 
-def _dup_key(title: str | None, site: str | None) -> str:
-    """Same title at the same source is treated as the same job posted twice."""
-    return f"{(title or '').strip().lower()}|{(site or '').strip().lower()}"
+_COMPANY_SUFFIXES = re.compile(r"\b(inc|llc|ltd|corp|corporation|co|company|plc|lp|llp|group|holdings)\b")
+
+
+def _dup_key(j) -> str:
+    """The same title at the same company is the same job, whichever board listed it.
+
+    When the company isn't known, the board stands in for it.
+    """
+    title = re.sub(r"[^a-z0-9]+", " ", (j["title"] or "").lower()).strip()
+    who = company_for(j["company"], j["site"], j["application_url"]) or j["site"] or ""
+    who = _COMPANY_SUFFIXES.sub(" ", re.sub(r"[^a-z0-9]+", " ", who.lower()))
+    return f"{title}|{' '.join(who.split())}"
 
 
 def job_meta(j) -> str:
@@ -545,7 +555,7 @@ def _job_card(j, applied_keys: set[str]) -> str:
     if not applied and not dup and needs_account(apply_url):
         dup = ('<div class="muted small">🔑 Apply by hand: this company\'s site needs an account, '
                'so auto-apply skips it.</div>')
-    if not applied and _dup_key(j["title"], j["site"]) in applied_keys:
+    if not applied and _dup_key(j) in applied_keys:
         dup = ('<div class="review" style="margin:0"><b style="color:var(--warn)">You already applied to a job '
                'with this title here.</b> It\'s probably the same posting listed twice.</div>')
     edits = [f'<a href="/edit?f={resume_rel}">Edit resume</a>'] if resume_rel and not applied else []
@@ -597,7 +607,7 @@ def _tailored_jobs() -> list:
 def applied_html() -> bytes:
     jobs = _tailored_jobs()
     done = sorted((j for j in jobs if j["applied_at"]), key=lambda j: j["applied_at"], reverse=True)
-    keys = {_dup_key(j["title"], j["site"]) for j in done}
+    keys = {_dup_key(j) for j in done}
     if not done:
         body = """<h1>Applied</h1><div class="card empty"><div class="big">📬</div><h2>No applications yet</h2>
 <p class="muted">When you tick <b>I applied to this job</b> on Ready to apply, or auto-apply submits one, it shows
@@ -644,10 +654,15 @@ def ready_html(view: str = "") -> bytes:
 <p class="muted">{note}</p><a class="btn ghost" href="/status">Check progress</a></div>"""
         return page("Ready to apply", body, "ready")
 
-    todo = [j for j in jobs if not j["applied_at"]]
     done = sorted((j for j in jobs if j["applied_at"]), key=lambda j: j["applied_at"], reverse=True)
-    applied_keys = {_dup_key(j["title"], j["site"]) for j in done}
-    mine = [j for j in todo if needs_you(j) and _dup_key(j["title"], j["site"]) not in applied_keys]
+    applied_keys = {_dup_key(j) for j in done}
+    # The same posting found on two boards is listed once (jobs come best match first, so the best copy stays).
+    todo, seen = [], set()
+    for j in jobs:
+        if not j["applied_at"] and _dup_key(j) not in seen:
+            seen.add(_dup_key(j))
+            todo.append(j)
+    mine = [j for j in todo if needs_you(j) and _dup_key(j) not in applied_keys]
     tabs = ai_banner()
     tabs += (f'<div class="tabs"><a href="/ready"{" class=on" if view != "needs" else ""}>All to apply '
             f'<span>{len(todo)}</span></a><a href="/ready?view=needs"{" class=on" if view == "needs" else ""}>'
@@ -768,12 +783,12 @@ def apply_candidates() -> tuple[list, int]:
         f"AND COALESCE(apply_error, '') NOT IN ({', '.join(repr(r) for r in HAND_ONLY_REASONS)}) "
         "ORDER BY fit_score DESC").fetchall()
     # Never queue the same posting twice: skip duplicates of anything applied to, and of each other.
-    seen = {_dup_key(t, st) for t, st in conn.execute(
-        "SELECT title, site FROM jobs WHERE applied_at IS NOT NULL "
+    seen = {_dup_key(r) for r in conn.execute(
+        "SELECT title, site, company, application_url FROM jobs WHERE applied_at IS NOT NULL "
         f"OR COALESCE(apply_error, '') IN ({', '.join(repr(r) for r in HAND_ONLY_REASONS)})").fetchall()}
     unique = []
     for r in rows:
-        key = _dup_key(r["title"], r["site"])
+        key = _dup_key(r)
         if key not in seen:
             seen.add(key)
             unique.append(r)
