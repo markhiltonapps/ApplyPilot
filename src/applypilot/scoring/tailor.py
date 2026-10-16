@@ -81,7 +81,7 @@ Take the base resume and job description. Return a tailored resume as a JSON obj
 ## SKILLS BOUNDARY (real skills only):
 {skills_block}
 
-You MAY add 2-3 closely related tools (Kubernetes if Docker, Terraform if AWS, Redis if PostgreSQL). No unrelated languages/frameworks.
+Do not add any skill, tool, language or framework that isn't in this list, not even closely related ones.
 
 ## TAILORING RULES:
 
@@ -89,7 +89,7 @@ TITLE: Match the target role. Keep seniority (Senior/Lead/Staff). Drop company s
 
 SUMMARY: Rewrite from scratch. Lead with the 1-2 skills that matter most for THIS role. Sound like someone who's done this job.
 
-SKILLS: Reorder each category so the job's must-haves appear first.
+SKILLS: Use the skill groups and wording from the base resume. Reorder so the job's must-haves appear first.
 
 Reframe EVERY bullet for this role. Same real work, different angle. Every bullet must be reworded. Never copy verbatim.
 
@@ -98,8 +98,8 @@ PROJECTS: Reorder by relevance. Drop irrelevant projects entirely.
 BULLETS: Strong verb + what you built + quantified impact. Vary verbs (Built, Designed, Implemented, Reduced, Automated, Deployed, Operated, Optimized). Most relevant first. Max 4 per section.
 
 ## VOICE:
-- Write like a real engineer. Short, direct.
-- GOOD: "Automated financial reporting with Python + API integrations, cut processing time from 10 hours to 2"
+- Write like a real practitioner of this person's kind of work (not necessarily an engineer). Short, direct.
+- GOOD: "Automated financial reporting with API integrations, cut processing time from 10 hours to 2"
 - BAD: "Leveraged cutting-edge AI technologies to drive transformative operational efficiencies"
 - BANNED WORDS (using ANY of these = validation failure — do not use them even once):
   {banned_str}
@@ -108,6 +108,10 @@ BULLETS: Strong verb + what you built + quantified impact. Vary verbs (Built, De
 ## HARD RULES:
 - Do NOT invent work, companies, degrees, or certifications
 - TECHNICAL SKILLS may only list skills from the allowed list above; never add tools (like Office apps) that aren't there
+- Keep how the base resume qualifies a skill. If it says AI-assisted, familiar with, exposure to, or similar, keep
+  that wording next to those skills. Never list programming languages as ones the person writes unless the base
+  resume says they write them; building software with AI coding tools is not knowing the language.
+- Do not create skill groups the base resume doesn't have (for example, no "Languages" group unless it has one).
 - Do NOT change real numbers ({metrics_str})
 - EXPERIENCE must include a role at EVERY one of these companies, with the company name written exactly as shown (you may shorten their bullets): {companies_str}
 - Preserved school: {school}
@@ -116,7 +120,7 @@ BULLETS: Strong verb + what you built + quantified impact. Vary verbs (Built, De
 
 ## OUTPUT: Return ONLY valid JSON. No markdown fences. No commentary. No "here is" preamble.
 
-{{"title":"Role Title","summary":"2-3 tailored sentences.","skills":{{"Languages":"...","Frameworks":"...","DevOps & Infra":"...","Databases":"...","Tools":"..."}},"experience":[{{"header":"Title at Company","subtitle":"Tech | Dates","bullets":["bullet 1","bullet 2","bullet 3","bullet 4"]}}],"projects":[{{"header":"Project Name - Description","subtitle":"Tech | Dates","bullets":["bullet 1","bullet 2"]}}],"education":"{school} | {education_level}"}}"""
+{{"title":"Role Title","summary":"2-3 tailored sentences.","skills":{{"<skill group from the base resume>":"...","<another group from the base resume>":"..."}},"experience":[{{"header":"Title at Company","subtitle":"Tech | Dates","bullets":["bullet 1","bullet 2","bullet 3","bullet 4"]}}],"projects":[{{"header":"Project Name - Description","subtitle":"Tech | Dates","bullets":["bullet 1","bullet 2"]}}],"education":"{school} | {education_level}"}}"""
 
 
 def _build_judge_prompt(profile: dict) -> str:

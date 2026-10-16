@@ -185,10 +185,14 @@ def requeue_failed_scores() -> None:
                 "WHERE tailored_resume_path IS NOT NULL OR cover_letter_path IS NOT NULL").rowcount
             retailor_marker.write_text("1")
             log(f"Rewriting resumes and cover letters for {r} job(s)")
-        # One-time: rewrite resumes and cover letters not yet used, so they draw on the updated
-        # master resume. Ones the person edited by hand are kept.
+        # Whenever the master resume changes (and once for older setups), rewrite the resumes and cover
+        # letters not yet used so they draw on it. Ones the person edited by hand are kept.
         refresh_marker = DATA_DIR / ".refresh_v3"
-        if not refresh_marker.exists():
+        resume_marker = DATA_DIR / ".tailored_from_resume"
+        resume_changed = resume_marker.exists() and resume_marker.read_text().strip() != resume_hash
+        if not resume_marker.exists() or resume_changed:
+            resume_marker.write_text(resume_hash)
+        if not refresh_marker.exists() or resume_changed:
             r = 0
             for url, path, when in conn.execute(
                     "SELECT url, tailored_resume_path, tailored_at FROM jobs "
