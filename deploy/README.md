@@ -64,3 +64,9 @@ docker run -p 8080:8080 -v applypilot-data:/data \
   -e APPLYPILOT_RESUME_TXT="$(cat ~/.applypilot/resume.txt)" \
   applypilot-server
 ```
+
+**Master resume builder** (`/onboard`, `deploy/onboarding.py`). New users upload their resume(s) and LinkedIn PDF;
+the configured AI drafts one complete master resume (never inventing facts), asks up to 7 follow-up questions
+about gaps (team sizes, results, missing dates), works the answers in, then suggests job titles with plain-English
+descriptions and pre-fills Setup. Each AI step runs in a background thread; progress lives in
+`/data/onboarding.json`.

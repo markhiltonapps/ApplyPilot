@@ -356,6 +356,7 @@ def write_config(data_dir: Path, f: dict[str, str]) -> None:
             "legally_authorized_to_work": yes_no.get(f.get("authorized", "yes"), "Yes"),
             "require_sponsorship": yes_no.get(f.get("sponsorship", "no"), "No"),
             "work_permit_type": "",
+            "citizenship": f.get("citizenship", ""),
         },
         "availability": {
             "earliest_start_date": f.get("start_date") or "Immediately",
@@ -571,6 +572,9 @@ document.querySelectorAll('.pk').forEach(function(d){{d.style.display=d.dataset.
 {text("currency", "Currency", default="USD")}
 {select("authorized", "Legally allowed to work in this country?", [("yes", "Yes"), ("no", "No")], "yes")}
 {select("sponsorship", "Need visa sponsorship?", [("no", "No"), ("yes", "Yes")], "no")}
+{select("citizenship", "Citizenship (some applications ask)", [("", "Choose one"), ("U.S. citizen", "U.S. citizen"),
+    ("U.S. permanent resident (green card holder)", "U.S. permanent resident (green card)"),
+    ("Not a U.S. citizen or permanent resident", "Neither")], "")}
 {text("start_date", "Earliest start date", default="Immediately")}
 </fieldset>
 

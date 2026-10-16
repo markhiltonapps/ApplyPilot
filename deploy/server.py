@@ -38,6 +38,7 @@ from urllib.parse import parse_qs, unquote, urlparse
 
 import agent_control
 import editor
+import onboarding
 import setup_form
 import ui
 
@@ -321,6 +322,19 @@ def job_counts() -> dict[str, int] | None:
             conn.close()
     except sqlite3.Error:
         return None
+
+
+def setup_banner(onboarded: bool) -> str:
+    if onboarded:
+        return ('<div class="card" style="border-color:#22c55e55;margin-bottom:16px"><b>Your master resume and '
+                'details are filled in below.</b> <span class="muted">Check the AI service, salary range and '
+                'voluntary questions, then click <b>Save and start searching</b> at the bottom.</span></div>')
+    has_resume = (DATA_DIR / "resume.txt").exists()
+    lead = "Want a stronger resume?" if has_resume else "New here? Start with this."
+    return (f'<div class="card" style="display:flex;gap:14px;align-items:center;flex-wrap:wrap;margin-bottom:16px">'
+            f'<div style="flex:1;min-width:220px"><b>{lead}</b> <span class="muted">Upload your resume and LinkedIn '
+            'PDF, answer a few questions, and ApplyPilot builds your master resume and fills in this page.</span>'
+            '</div><a class="btn primary sm" href="/onboard">Build my master resume</a></div>')
 
 
 def _ago(iso: str | None) -> str:
@@ -1041,7 +1055,13 @@ class Handler(BaseHTTPRequestHandler):
             if resume.exists():
                 return self._send(200, resume.read_bytes(), "text/plain; charset=utf-8")
         if path == "/setup":
-            return self._send(200, page("ApplyPilot setup", setup_form.render(DATA_DIR, os.environ), "setup"))
+            onboarded = parse_qs(urlparse(self.path).query).get("from") == ["onboard"]
+            return self._send(200, page("ApplyPilot setup", setup_banner(onboarded)
+                                        + setup_form.render(DATA_DIR, os.environ), "setup"))
+        if path == "/onboard":
+            body, refresh = onboarding.render(DATA_DIR, os.environ)
+            head = onboarding.CSS + ('<meta http-equiv="refresh" content="4">' if refresh else "")
+            return self._send(200, page("Build your master resume", body, "setup", head))
         if path == "/":
             if seed_config():
                 return self._send(303, b"", "text/plain", {"Location": "/setup"})
@@ -1085,12 +1105,16 @@ class Handler(BaseHTTPRequestHandler):
     def do_POST(self):
         path = urlparse(self.path).path
         if path not in ("/run", "/setup", "/edit", "/mark", "/api/results", "/api/log", "/autoapply/start",
-                        "/autoapply/stop", "/api/agent/poll", "/api/agent/status", "/api/agent/done"):
+                        "/autoapply/stop", "/api/agent/poll", "/api/agent/status", "/api/agent/done",
+                        "/onboard/start", "/onboard/answers", "/onboard/finish", "/onboard/restart",
+                        "/onboard/retry"):
             return self._send(404, b"Not found", "text/plain")
         if not self._authorized():
             return
         if path.startswith("/autoapply/"):
             return self._post_autoapply(path)
+        if path.startswith("/onboard/"):
+            return self._post_onboard(path)
         if path.startswith("/api/agent/"):
             return self._post_agent(path)
         if path == "/setup":
@@ -1129,6 +1153,39 @@ class Handler(BaseHTTPRequestHandler):
             threading.Thread(target=run_pipeline, daemon=True).start()
             msg = "Pipeline started."
         self._send(303, msg.encode(), "text/plain", {"Location": "/status"})
+
+    def _post_onboard(self, path: str):
+        length = int(self.headers.get("Content-Length") or 0)
+        if path == "/onboard/start":
+            if length > 3 * setup_form.MAX_UPLOAD_BYTES + 1024 * 1024:
+                return self._send(413, page("Too large", "<p>Those files are too large (10 MB each).</p>"))
+            fields, files = setup_form.parse_multipart(self.headers.get("Content-Type", ""), self.rfile.read(length))
+            sources, problems = onboarding.sources_from_upload(fields, files)
+            if problems and not sources:
+                body, _ = onboarding.render(DATA_DIR, os.environ, problems)
+                return self._send(200, page("Build your master resume", body, "setup", onboarding.CSS))
+            onboarding.start_draft(DATA_DIR, sources)
+            log("Resume builder: drafting a master resume")
+            return self._send(303, b"", "text/plain", {"Location": "/onboard"})
+        form = parse_qs(self.rfile.read(min(length, 2 * 1024 * 1024)).decode("utf-8", errors="replace"),
+                        keep_blank_values=True)
+        one = {k: v[0] for k, v in form.items()}
+        if path == "/onboard/restart":
+            onboarding.restart(DATA_DIR)
+        elif path == "/onboard/retry":
+            onboarding.retry(DATA_DIR)
+        elif path == "/onboard/answers":
+            answers = [one.get(f"a{i}", "") for i in range(10)]
+            onboarding.start_revise(DATA_DIR, [] if one.get("go") == "skip" else answers)
+        elif path == "/onboard/finish":
+            one["titles_picked"] = "\n".join(form.get("title_pick", []))
+            problems = onboarding.finish(DATA_DIR, one)
+            if problems:
+                body, _ = onboarding.render(DATA_DIR, os.environ, problems)
+                return self._send(200, page("Build your master resume", body, "setup", onboarding.CSS))
+            log("Resume builder: master resume saved; Setup filled in")
+            return self._send(303, b"", "text/plain", {"Location": "/setup?from=onboard"})
+        return self._send(303, b"", "text/plain", {"Location": "/onboard"})
 
     def _read_json(self) -> dict:
         length = int(self.headers.get("Content-Length") or 0)

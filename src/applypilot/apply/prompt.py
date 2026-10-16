@@ -60,6 +60,8 @@ def _build_profile_summary(profile: dict) -> str:
     lines.append(f"Sponsorship Needed: {work_auth.get('require_sponsorship', 'See profile')}")
     if work_auth.get("work_permit_type"):
         lines.append(f"Work Permit: {work_auth['work_permit_type']}")
+    if work_auth.get("citizenship"):
+        lines.append(f"Citizenship: {work_auth['citizenship']}")
 
     # Compensation
     currency = comp.get("salary_currency", "USD")
