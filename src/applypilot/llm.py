@@ -205,6 +205,9 @@ class LLMClient:
 
     @staticmethod
     def _handle_compat_response(resp: httpx.Response, model: str = "") -> str:
+        if resp.status_code >= 400 and resp.status_code not in (429, 503):
+            # The status alone ("403 Forbidden") doesn't say why; the provider's message does.
+            log.error("LLM request refused (HTTP %s): %s", resp.status_code, resp.text[:300])
         resp.raise_for_status()
         data = resp.json()
         choice = data["choices"][0]

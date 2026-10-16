@@ -196,6 +196,16 @@ def ai_problem(data_dir: Path) -> str | None:
                         cd = c.json().get("data") or {}
                         if float(cd.get("total_credits") or 0) - float(cd.get("total_usage") or 0) <= 0:
                             problem = "Your OpenRouter account is out of credit."
+                    if not problem:  # the key and credit look fine; make sure a real request goes through
+                        t = httpx.post(f"{OPENROUTER_URL}/chat/completions", headers=headers, timeout=30,
+                                       json={"model": env.get("LLM_MODEL") or OPENROUTER_MODEL, "max_tokens": 1,
+                                             "messages": [{"role": "user", "content": "Hi"}]})
+                        if t.status_code >= 400 and t.status_code not in (429, 500, 502, 503):
+                            try:
+                                why = (t.json().get("error") or {}).get("message") or t.text
+                            except ValueError:
+                                why = t.text
+                            problem = f"OpenRouter is refusing requests (HTTP {t.status_code}): {why[:200]}"
         except (httpx.HTTPError, ValueError, TypeError):
             problem = None
     _ai_check.update(at=time.time(), problem=problem)
@@ -318,6 +328,7 @@ def save(data_dir: Path, fields: dict[str, str], files: dict[str, tuple[str, byt
             if key:
                 env["LLM_API_KEY"] = key
             _write_env(data_dir, env)
+            _ai_check["at"] = 0.0  # check the new settings on the next page view
         else:
             errors.append("Add your OpenRouter API key.")
     else:
