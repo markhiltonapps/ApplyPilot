@@ -34,7 +34,7 @@ import urllib.request
 import zipfile
 from pathlib import Path
 
-VERSION = "8"
+VERSION = "9"
 SERVER = "__SERVER_URL__"  # filled in by the server when you download this file
 USER = "__SERVER_USER__"  # your site username, also filled in by the server
 MODEL = os.environ.get("APPLYPILOT_MODEL", "sonnet")  # Claude model used to fill in forms
@@ -424,8 +424,33 @@ def run_child(cmd: dict) -> int:
         post_status(password, "That job is no longer on the auto-apply list.")
         return 0
     post_status(password, "Opening Chrome...")
-    apply_now(1 if url else int(cmd.get("count") or 1), min_score, practice=practice, url=url, password=password)
+    if url or practice:
+        apply_now(1, min_score, practice=practice, url=url, password=password)
+        return 0
+    submit_until(int(cmd.get("count") or 1), min_score, password)
     return 0
+
+
+def submit_until(goal: int, min_score: int, password: str) -> None:
+    """Keep applying, best match first, until `goal` applications are submitted or the list runs out.
+
+    Jobs it can't finish (an account wall, a CAPTCHA) don't count toward the goal. To keep a bad batch from
+    running all night, it stops after trying three times as many jobs as asked for.
+    """
+    def counts() -> tuple[int, int]:
+        rows = local_results()
+        return sum(r["status"] == "applied" for r in rows), len(rows)
+
+    submitted, tried = counts()
+    while submitted < goal and tried < goal * 3:
+        before = tried
+        apply_now(goal - submitted, min_score, practice=False, password=password)
+        submitted, tried = counts()
+        if tried == before:  # nothing left that auto-apply can do
+            post_status(password, f"Submitted {submitted} of {goal}; no more jobs auto-apply can handle right now.")
+            break
+        if submitted < goal:
+            post_status(password, f"Submitted {submitted} of {goal} so far; carrying on...")
 
 
 def agent_main() -> None:
@@ -590,6 +615,7 @@ def main() -> None:
     if "__SERVER" in SERVER:
         sys.exit("Download this file from your ApplyPilot site's Auto-apply page; it fills in your server address.")
     os.environ["APPLYPILOT_DIR"] = str(DATA)  # before importing applypilot, which reads it at import time
+    os.environ["APPLYPILOT_NO_INRUN_RETRY"] = "1"  # failed jobs are retried on a later run, not straight away
     DATA.mkdir(parents=True, exist_ok=True)
 
     if "--agent" in sys.argv:

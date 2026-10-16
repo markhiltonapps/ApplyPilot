@@ -123,6 +123,8 @@ def acquire_job(target_url: str | None = None, min_score: int = 7,
             """, (target_url, target_url, like, like)).fetchone()
         else:
             blocked_sites, blocked_patterns = _load_blocked()
+            # The companion retries failed jobs on later runs, so it doesn't want them picked again right away.
+            no_retry = 1 if os.environ.get("APPLYPILOT_NO_INRUN_RETRY") else 0
             # Build parameterized filters to avoid SQL injection
             params: list = [min_score]
             site_clause = ""
@@ -139,14 +141,14 @@ def acquire_job(target_url: str | None = None, min_score: int = 7,
                        fit_score, location, full_description, cover_letter_path
                 FROM jobs
                 WHERE tailored_resume_path IS NOT NULL
-                  AND (apply_status IS NULL OR apply_status = 'failed')
+                  AND (apply_status IS NULL OR (apply_status = 'failed' AND ? = 0))
                   AND (apply_attempts IS NULL OR apply_attempts < ?)
                   AND fit_score >= ?
                   {site_clause}
                   {url_clauses}
                 ORDER BY fit_score DESC, url
                 LIMIT 1
-            """, [config.DEFAULTS["max_apply_attempts"]] + params).fetchone()
+            """, [no_retry, config.DEFAULTS["max_apply_attempts"]] + params).fetchone()
 
         if not row:
             conn.rollback()

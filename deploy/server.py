@@ -567,7 +567,8 @@ def _tailored_jobs() -> list:
             conn.row_factory = sqlite3.Row
             jobs = conn.execute(
                 "SELECT title, site, company, location, url, application_url, fit_score, tailored_resume_path, "
-                "cover_letter_path, applied_at, apply_status, apply_error FROM jobs WHERE tailored_resume_path IS NOT NULL "
+                "cover_letter_path, applied_at, apply_status, apply_error, COALESCE(apply_attempts, 0) AS apply_attempts "
+                "FROM jobs WHERE tailored_resume_path IS NOT NULL "
                 "AND (applied_at IS NOT NULL OR fit_score IS NULL OR fit_score >= ?) "
                 "ORDER BY fit_score DESC, tailored_at DESC", (int(setup_form.saved_min_score(DATA_DIR)),)).fetchall()
             conn.close()
@@ -593,7 +594,28 @@ you sent. Tap <b>Undo</b> to move one back to Ready to apply.</p>
     return page("Applied", body, "applied")
 
 
-def ready_html() -> bytes:
+# Reasons a job isn't worth doing at all (closed, wrong kind of role), as opposed to ones that need a person.
+DEAD_END_WORDS = ("expired", "closed", "no_longer", "contract", "1099", "freelance", "part_time", "part-time",
+                  "not_eligible", "eligib", "authorization", "clearance", "relocat", "already_applied", "duplicate",
+                  "not_a_job", "no_job_url", "no job url")
+
+
+def needs_you(j) -> bool:
+    """Auto-apply has done what it can: this job is waiting on the person (an account, a CAPTCHA, a stuck form)."""
+    if j["applied_at"]:
+        return False
+    if needs_account(j["application_url"] or j["url"]):
+        return True
+    status = j["apply_status"] or ""
+    if not status or status in ("applied", "applied_auto", "in_progress"):
+        return False
+    reason = (j["apply_error"] or status).lower()
+    if any(w in reason for w in DEAD_END_WORDS):
+        return False
+    return status == "manual" or reason in HAND_ONLY_REASONS or not worth_retrying(reason, j["apply_attempts"])
+
+
+def ready_html(view: str = "") -> bytes:
     jobs = _tailored_jobs()
     if not jobs:
         c = job_counts() or {"good_fit": 0}
@@ -608,6 +630,20 @@ def ready_html() -> bytes:
     todo = [j for j in jobs if not j["applied_at"]]
     done = sorted((j for j in jobs if j["applied_at"]), key=lambda j: j["applied_at"], reverse=True)
     applied_keys = {_dup_key(j["title"], j["site"]) for j in done}
+    mine = [j for j in todo if needs_you(j) and _dup_key(j["title"], j["site"]) not in applied_keys]
+    tabs = (f'<div class="tabs"><a href="/ready"{" class=on" if view != "needs" else ""}>All to apply '
+            f'<span>{len(todo)}</span></a><a href="/ready?view=needs"{" class=on" if view == "needs" else ""}>'
+            f'Needs you <span>{len(mine)}</span></a></div>')
+    if view == "needs":
+        cards = "".join(_job_card(j, applied_keys) for j in mine) or (
+            '<div class="card empty"><div class="big">✅</div><h2>Nothing waiting on you</h2>'
+            '<p class="muted">Jobs auto-apply can&rsquo;t finish (an account, a CAPTCHA) show up here.</p></div>')
+        body = f"""<h1>Ready to apply</h1>{tabs}
+<p class="sub">{len(mine)} job{"s" if len(mine) != 1 else ""} auto-apply couldn&rsquo;t finish, best match first. The
+resume and cover letter are already written: click <b>Apply</b>, fill in the form (use <b>Resume</b> and
+<b>Cover letter</b> to download them), then tick <b>I applied</b>.</p>
+<div class="stack">{cards}</div>"""
+        return page("Needs you", body, "ready", READY_CSS)
     todo_html = "".join(_job_card(j, applied_keys) for j in todo) or (
         '<div class="card empty"><div class="big">🎉</div><h2>All caught up</h2>'
         '<p class="muted">New matches appear here after each search.</p></div>')
@@ -619,8 +655,19 @@ jobs scoring {setup_form.saved_min_score(DATA_DIR)} or more ({sum(1 for j in tod
 them score 7+, which the Jobs tab calls a strong fit). Download the resume,
 apply, then tick <b>I applied</b> so you never apply twice.</p>
 <div class="stack">{todo_html}</div>{done_html}"""
-    return page("Ready to apply", body, "ready")
+    return page("Ready to apply", body.replace("<h1>Ready to apply</h1>", "<h1>Ready to apply</h1>" + tabs, 1),
+                "ready", READY_CSS)
 
+
+READY_CSS = """<style>
+.tabs{display:flex;gap:6px;margin:4px 0 16px;border-bottom:1px solid var(--line)}
+.tabs a{padding:9px 14px;color:var(--muted);text-decoration:none;font-weight:600;border-bottom:2px solid transparent;
+  margin-bottom:-1px}
+.tabs a.on{color:var(--text);border-bottom-color:var(--accent)}
+.tabs a span{display:inline-block;min-width:22px;padding:1px 7px;margin-left:5px;border-radius:999px;font-size:12.5px;
+  background:var(--surface-2);color:var(--muted);text-align:center}
+.tabs a.on span{background:var(--accent);color:var(--accent-ink)}
+</style>"""
 
 APP_ROOT = Path(__file__).resolve().parent.parent  # the ApplyPilot source the server runs
 _package_cache: bytes | None = None
@@ -937,13 +984,15 @@ the companion</a></div></div>"""
 <h2>Apply to your best matches</h2>{why_off}
 <form method="post" action="/autoapply/start">
 <input type="hidden" name="mode" value="real">
-<div class="aa-real"><span>Apply to the next</span><input type="number" name="count" min="1" max="{len(jobs)}"
- value="{min(3, len(jobs))}"><span>job(s), best match first</span></div>
+<div class="aa-real"><span>Submit</span><input type="number" name="count" min="1" max="{len(jobs)}"
+ value="{min(3, len(jobs))}"><span>application(s), best match first</span></div>
 <label class="aa-check"><input type="checkbox" name="confirm" value="yes" required>
 <span>I understand these applications will be <b>submitted under my name</b>.</span></label>
 <button class="btn primary"{dis}>Start applying</button>
-<p class="muted small" style="margin:10px 0 0">Each one takes a few minutes. Every job it submits moves to the
-<a href="/applied">Applied</a> tab right away. Press Stop any time.</p>
+<p class="muted small" style="margin:10px 0 0">Jobs it can&rsquo;t finish (an account, a CAPTCHA) don&rsquo;t count:
+it skips them and keeps going until that many are submitted, or the list runs out. Each one takes a few minutes, and
+every job it submits moves to the <a href="/applied">Applied</a> tab right away. Skipped jobs wait for you under
+<a href="/ready?view=needs">Ready to apply &rarr; Needs you</a>. Press Stop any time.</p>
 </form></div>
 <div class="card"><h2>Or pick a job</h2>
 <p class="muted small" style="margin:-4px 0 8px"><b>Practice</b> fills in the form on your PC and stops before
@@ -1097,7 +1146,8 @@ class Handler(BaseHTTPRequestHandler):
         if path == "/status":
             return self._send(200, status_html())
         if path == "/ready":
-            return self._send(200, ready_html())
+            view = parse_qs(urlparse(self.path).query).get("view", [""])[0]
+            return self._send(200, ready_html(view))
         if path == "/applied":
             return self._send(200, applied_html())
         if path == "/status.json":
@@ -1164,7 +1214,8 @@ class Handler(BaseHTTPRequestHandler):
             form = parse_qs(self.rfile.read(min(length, 65536)).decode("utf-8", errors="replace"))
             url = form.get("url", [""])[0]
             mark_applied(url, form.get("action", ["applied"])[0] == "applied")
-            back = "/applied" if "/applied" in (self.headers.get("Referer") or "") else "/ready"
+            referer = self.headers.get("Referer") or ""
+            back = "/applied" if "/applied" in referer else ("/ready?view=needs" if "view=needs" in referer else "/ready")
             return self._send(303, b"", "text/plain", {"Location": back})
         if _run_lock.locked():
             msg = "Pipeline is already running."
@@ -1236,7 +1287,7 @@ class Handler(BaseHTTPRequestHandler):
                 if url:
                     count = 1
                 elif not title:
-                    title = f"next {count} job{'s' if count != 1 else ''}"
+                    title = f"{count} application{'s' if count != 1 else ''}"
                 error = control.queue("real" if mode == "real" else "practice", url, count, title)
                 log(f"Auto-apply: {error or f'queued {mode} run for {title}'}")
         return self._send(303, b"", "text/plain", {"Location": "/autoapply"})
