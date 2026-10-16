@@ -331,6 +331,76 @@ li {{
 </html>"""
 
 
+# ── Cover Letter ─────────────────────────────────────────────────────────
+
+def is_cover_letter(path: Path) -> bool:
+    return Path(path).name.endswith("_CL.txt")
+
+
+def _letterhead() -> tuple[str, list[str]]:
+    """The applicant's name and contact details, from the profile."""
+    try:
+        from applypilot.config import load_profile
+        personal = load_profile().get("personal", {})
+    except (OSError, ValueError):
+        return "", []
+    place = ", ".join(x for x in (personal.get("city"), personal.get("province_state")) if x)
+    linkedin = (personal.get("linkedin_url") or "").split("://", 1)[-1].removeprefix("www.").rstrip("/")
+    details = [x for x in (place, personal.get("phone"), personal.get("email"), linkedin) if x]
+    return personal.get("full_name") or "", details
+
+
+_CLOSINGS = ("sincerely", "best", "regards", "kind regards", "warm regards", "thank you", "thanks", "respectfully",
+             "cheers", "all the best")
+
+
+def letter_paragraphs(text: str, full_name: str = "") -> list[str]:
+    """The letter's paragraphs, with a conventional closing when it ends on a bare first name."""
+    paragraphs = [p.strip() for p in text.strip().replace("\r\n", "\n").split("\n\n") if p.strip()]
+    if len(paragraphs) > 1:
+        last, before = paragraphs[-1], paragraphs[-2]
+        has_closing = any(x.lower().lstrip().startswith(_CLOSINGS) for x in (last, before))
+        if not has_closing and "\n" not in last and len(last.split()) <= 3 and last.replace(" ", "").isalpha():
+            paragraphs[-1] = f"Sincerely,\n{full_name or last}"
+    return paragraphs
+
+
+def build_letter_html(text: str, date: str | None = None) -> str:
+    """A business letter: letterhead, date, then the letter left-aligned as written."""
+    import html
+    from datetime import date as _date
+
+    name, details = _letterhead()
+    when = date or _date.today().strftime("%B %d, %Y").replace(" 0", " ")
+    paragraphs = letter_paragraphs(text, name)
+    body = "".join(f"<p>{html.escape(p).replace(chr(10), '<br>')}</p>" for p in paragraphs)
+    head = ""
+    if name:
+        head = (f'<div class="head"><div class="name">{html.escape(name)}</div>'
+                f'<div class="contact">{" &nbsp;|&nbsp; ".join(html.escape(d) for d in details)}</div></div>')
+    return f"""<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8">
+<style>
+@page {{ size: letter; margin: 0.8in 0.95in; }}
+* {{ margin: 0; padding: 0; box-sizing: border-box; }}
+body {{ font-family: 'Calibri', 'Segoe UI', Arial, sans-serif; font-size: 11pt; line-height: 1.45; color: #1a1a1a; }}
+.head {{ border-bottom: 1.5px solid #2a7ab5; padding-bottom: 6px; margin-bottom: 22px; }}
+.name {{ font-size: 18pt; font-weight: 700; color: #1a3a5c; letter-spacing: 0.5px; }}
+.contact {{ font-size: 9.5pt; color: #444; margin-top: 2px; }}
+.date {{ margin-bottom: 18px; }}
+p {{ margin-bottom: 12px; text-align: left; }}
+</style>
+</head>
+<body>
+{head}
+<div class="date">{when}</div>
+{body}
+</body>
+</html>"""
+
+
 # ── PDF Renderer ─────────────────────────────────────────────────────────
 
 def render_pdf(html: str, output_path: str) -> None:
@@ -373,8 +443,7 @@ def convert_to_pdf(
     """
     text_path = Path(text_path)
     text = text_path.read_text(encoding="utf-8")
-    resume = parse_resume(text)
-    html = build_html(resume)
+    html = build_letter_html(text) if is_cover_letter(text_path) else build_html(parse_resume(text))
 
     if html_only:
         out = output_path or text_path.with_suffix(".html")

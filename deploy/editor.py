@@ -112,8 +112,8 @@ def page_body(doc: Path, rel: str, job_title: str, kind: str, message: str = "")
 </form>"""
 
 
-def to_docx(text: str) -> bytes:
-    """A simple Word version of a resume or letter: name, capitalised headings, bullets."""
+def to_docx(text: str, letter: bool = False) -> bytes:
+    """A simple Word version of a resume (name, capitalised headings, bullets) or a cover letter."""
     from docx import Document
     from docx.shared import Pt
 
@@ -121,6 +121,21 @@ def to_docx(text: str) -> bytes:
     normal = doc.styles["Normal"]
     normal.font.name = "Calibri"
     normal.font.size = Pt(10.5)
+    if letter:
+        from applypilot.scoring.pdf import _letterhead, letter_paragraphs
+        name, details = _letterhead()
+        if name:
+            run = doc.add_paragraph().add_run(name)
+            run.bold, run.font.size = True, Pt(18)
+            doc.add_paragraph("  |  ".join(details))
+        from datetime import date
+        doc.add_paragraph(date.today().strftime("%B %d, %Y").replace(" 0", " "))
+        normal.font.size = Pt(11)
+        for para in letter_paragraphs(text, name):
+            doc.add_paragraph(para)
+        buf = io.BytesIO()
+        doc.save(buf)
+        return buf.getvalue()
     first = True
     for raw in text.splitlines():
         line = raw.rstrip()

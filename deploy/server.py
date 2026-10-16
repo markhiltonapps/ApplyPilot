@@ -1148,7 +1148,7 @@ class Handler(BaseHTTPRequestHandler):
                 return self._send(404, b"Not found", "text/plain")
             if path == "/edit":
                 return self._send(200, edit_html(doc, rel))
-            return self._send(200, editor.to_docx(doc.read_text(encoding="utf-8")),
+            return self._send(200, editor.to_docx(doc.read_text(encoding="utf-8"), doc.name.endswith("_CL.txt")),
                               "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
                               {"Content-Disposition": f'attachment; filename="{doc.stem}.docx"'})
         if path == "/resume.txt":
@@ -1385,6 +1385,36 @@ class Handler(BaseHTTPRequestHandler):
         self._send(200, page("ApplyPilot setup", setup_form.render(DATA_DIR, os.environ, saved=True), "setup"))
 
 
+def relayout_cover_letters() -> None:
+    """Once: re-render existing cover letter PDFs in the letter layout (they used the resume layout before)."""
+    marker = DATA_DIR / ".cl_layout_v1"
+    letters = sorted((DATA_DIR / "cover_letters").glob("*_CL.txt"))
+    if marker.exists() or not letters:
+        marker.touch()
+        return
+    try:
+        from playwright.sync_api import sync_playwright
+
+        from applypilot.scoring.pdf import build_letter_html
+        done = 0
+        with sync_playwright() as p:
+            browser = p.chromium.launch()
+            page = browser.new_page()
+            for txt in letters:
+                try:
+                    page.set_content(build_letter_html(txt.read_text(encoding="utf-8")), wait_until="networkidle")
+                    page.pdf(path=str(txt.with_suffix(".pdf")), format="Letter", print_background=True,
+                             margin={"top": "0", "right": "0", "bottom": "0", "left": "0"})
+                    done += 1
+                except Exception as e:  # one bad file shouldn't stop the rest
+                    log(f"Cover letter re-layout failed for {txt.name}: {e}")
+            browser.close()
+        marker.touch()
+        log(f"Re-laid out {done} cover letter PDF(s) as letters")
+    except Exception as e:
+        log(f"Cover letter re-layout skipped: {e}")
+
+
 def main() -> None:
     if (DATA_DIR / "applypilot.db").exists():  # bring the job table up to date (e.g. the company column)
         from applypilot.database import init_db
@@ -1398,6 +1428,7 @@ def main() -> None:
     else:
         log("DASHBOARD_PASSWORD not set: web UI is locked; only /health responds.")
 
+    threading.Thread(target=relayout_cover_letters, daemon=True).start()
     threading.Thread(target=scheduler, daemon=True).start()
     httpd = ThreadingHTTPServer(("0.0.0.0", PORT), Handler)
     log(f"Listening on :{PORT} (data dir {DATA_DIR}, interval {INTERVAL_HOURS}h)")
