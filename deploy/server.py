@@ -520,9 +520,15 @@ def _job_for(doc: Path) -> tuple[str, str]:
     return (f"{row[0]} · {row[1]}" if row else doc.stem.replace("_", " ")), kind
 
 
-def edit_html(doc: Path, rel: str, message: str = "") -> bytes:
+def _back(value: str | None) -> str:
+    """Where the editor returns to: only pages of this site."""
+    return value if value in ("/ready", "/autoapply") else "/ready"
+
+
+def edit_html(doc: Path, rel: str, message: str = "", back: str = "/ready") -> bytes:
     title, kind = _job_for(doc)
-    return page(f"Edit {kind}", editor.page_body(doc, rel, title, kind, message), "ready")
+    return page(f"Edit {kind}", editor.page_body(doc, rel, title, kind, message, back),
+                "auto" if back == "/autoapply" else "ready")
 
 
 _COMPANY_SUFFIXES = re.compile(r"\b(inc|llc|ltd|corp|corporation|co|company|plc|lp|llp|group|holdings)\b")
@@ -1054,9 +1060,25 @@ the companion</a></div></div>"""
             title = f'{j["title"]} at {who}' if who else j["title"]
             hidden = (f'<input type="hidden" name="url" value="{esc(url, quote=True)}">'
                       f'<input type="hidden" name="title" value="{esc(title, quote=True)}">')
+            docs = []
+            lk = 'style="color:var(--accent);font-weight:500"'
+            if href := _doc_href(j["tailored_resume_path"]):
+                docs.append(f'<a {lk} href="{esc(href, quote=True)}" target="_blank">Resume</a>')
+            if href := _doc_href(j["cover_letter_path"]):
+                docs.append(f'<a {lk} href="{esc(href, quote=True)}" target="_blank">Cover letter</a>')
+            if rel := _rel(j["tailored_resume_path"]):
+                docs.append(f'<a {lk} href="/edit?f={esc(rel, quote=True)}&amp;back=/autoapply">Edit resume</a>')
+            if rel := _rel(j["cover_letter_path"]):
+                docs.append(f'<a {lk} href="/edit?f={esc(rel, quote=True)}&amp;back=/autoapply">Edit cover letter</a>')
+            flag = (' <span style="color:var(--warn)" title="The quality check flagged something: open Edit resume '
+                    'to see what">&#9888; check resume</span>' if _review_note(j["tailored_resume_path"]) else "")
+            skip = (f'<form method="post" action="/mark" style="display:inline"><input type="hidden" name="url" '
+                    f'value="{esc(j["url"], quote=True)}"><button class="linkbtn" name="action" value="skip" '
+                    f'title="Hide it and never auto-apply">&#10005; Not for me</button></form>')
             rows.append(f"""<div class="aa-job"><span class="score{" mid" if score < 7 else ""}">{score}</span>
 <div class="t"><a href="{esc(j["url"] or url, quote=True)}" target="_blank" rel="noopener">{esc(j["title"])}</a>
-<div class="meta">{job_meta(j)}</div></div>
+<div class="meta">{job_meta(j)}</div>
+<div class="muted small" style="margin-top:4px">{" &middot; ".join(docs)}{flag} &middot; {skip}</div></div>
 <div class="aa-btns"><form method="post" action="/autoapply/start">{hidden}<input type="hidden" name="mode"
  value="practice"><button class="btn ghost sm"{dis}>Practice</button></form>
 <form method="post" action="/autoapply/start" onsubmit="return confirm('Submit an application to this job under your name?')">
@@ -1084,7 +1106,10 @@ every job it submits moves to the <a href="/applied">Applied</a> tab right away.
 </form></div>
 <div class="card"><h2>Or pick a job</h2>
 <p class="muted small" style="margin:-4px 0 8px"><b>Practice</b> fills in the form on your PC and stops before
-submitting, so you can check it. <b>Apply</b> submits it.</p>
+submitting, so you can check it. <b>Apply</b> submits it. These are the jobs auto-apply will work through, in
+order: open <b>Resume</b> and <b>Cover letter</b> to see exactly what will be sent, fix anything with <b>Edit</b>,
+or click <b>Not for me</b> to skip a job. (Ready to apply also lists jobs auto-apply can&rsquo;t do, like ones that
+need an account, so the two lists differ.)</p>
 <div class="aa-jobs">{"".join(rows)}</div>{more}{acct}</div>"""
     else:
         controls = """<div class="card empty"><div class="big">📭</div><h2>Nothing to auto-apply right now</h2>
@@ -1202,7 +1227,8 @@ class Handler(BaseHTTPRequestHandler):
             if not doc:
                 return self._send(404, b"Not found", "text/plain")
             if path == "/edit":
-                return self._send(200, edit_html(doc, rel))
+                back = _back(parse_qs(urlparse(self.path).query).get("back", [""])[0])
+                return self._send(200, edit_html(doc, rel, back=back))
             return self._send(200, editor.to_docx(doc.read_text(encoding="utf-8"), doc.name.endswith("_CL.txt")),
                               "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
                               {"Content-Disposition": f'attachment; filename="{doc.stem}.docx"'})
@@ -1307,7 +1333,8 @@ class Handler(BaseHTTPRequestHandler):
             else:
                 mark_applied(url, action == "applied")
             referer = self.headers.get("Referer") or ""
-            back = ("/applied" if "/applied" in referer else "/ready?view=needs" if "view=needs" in referer
+            back = ("/applied" if "/applied" in referer else "/autoapply" if "/autoapply" in referer
+                    else "/ready?view=needs" if "view=needs" in referer
                     else "/ready?view=hidden" if "view=hidden" in referer else "/ready")
             return self._send(303, b"", "text/plain", {"Location": back})
         if _run_lock.locked():
@@ -1416,16 +1443,18 @@ class Handler(BaseHTTPRequestHandler):
         doc = editor.resolve(DATA_DIR, rel)
         if not doc:
             return self._send(404, b"Not found", "text/plain")
+        back = _back(form.get("back", [""])[0])
         if form.get("action", ["save"])[0] == "checked":
             editor.mark_checked(doc)
-            return self._send(303, b"", "text/plain", {"Location": "/ready"})
+            return self._send(303, b"", "text/plain", {"Location": back})
         content = form.get("content", [""])[0]
         if not content.strip():
-            return self._send(200, edit_html(doc, rel, "Nothing saved: the text was empty."))
+            return self._send(200, edit_html(doc, rel, "Nothing saved: the text was empty.", back))
         problem = editor.save(doc, content)
         editor.mark_checked(doc)
         log(f"Edited {rel}")
-        return self._send(200, edit_html(doc, rel, problem or "Saved. The PDF has been rebuilt with your changes."))
+        return self._send(200, edit_html(doc, rel, problem or "Saved. The PDF has been rebuilt with your changes.",
+                                         back))
 
     def _post_setup(self):
         length = int(self.headers.get("Content-Length") or 0)

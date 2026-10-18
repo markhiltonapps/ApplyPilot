@@ -89,7 +89,7 @@ def save(doc: Path, text: str) -> str | None:
     return None
 
 
-def page_body(doc: Path, rel: str, job_title: str, kind: str, message: str = "") -> str:
+def page_body(doc: Path, rel: str, job_title: str, kind: str, message: str = "", back: str = "/ready") -> str:
     notes = review_notes(doc) if kind == "resume" else ""
     notes_html = (f'<details class="review" open><summary>⚠ What to check</summary>'
                   f'<p>{html.escape(notes).replace(chr(10), "<br>")}</p></details>' if notes else "")
@@ -97,12 +97,14 @@ def page_body(doc: Path, rel: str, job_title: str, kind: str, message: str = "")
     checked_btn = ('<button class="btn ghost" name="action" value="checked" formnovalidate>'
                    'Looks fine, mark as checked</button>' if notes else "")
     q = html.escape(rel, quote=True)
-    return f"""<p><a href="/ready">&larr; Ready to apply</a></p>
+    back_label = "Auto-apply" if back == "/autoapply" else "Ready to apply"
+    return f"""<p><a href="{back}">&larr; {back_label}</a></p>
 <h1>Edit {kind}</h1>
 <p class="sub">{html.escape(job_title)}</p>
 {msg}{notes_html}
 <form class="editor" method="post" action="/edit">
 <input type="hidden" name="f" value="{q}">
+<input type="hidden" name="back" value="{back}">
 <textarea name="content" spellcheck="true">{html.escape(doc.read_text(encoding="utf-8"))}</textarea>
 <p class="muted small">Keep section headings (SUMMARY, EXPERIENCE...) in capitals and bullets starting with
 "- " so the PDF lays out correctly.</p>
