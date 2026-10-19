@@ -39,6 +39,7 @@ from urllib.parse import parse_qs, unquote, urlparse
 
 import agent_control
 import editor
+import employers
 import onboarding
 import setup_form
 import ui
@@ -133,6 +134,87 @@ def generate_dashboard() -> None:
     )
 
 
+def drop_employers(conn) -> None:
+    """Leave the employers named in APPLYPILOT_DROP_EMPLOYERS off the master resume, the Setup companies list
+    and resumes not yet sent, and report sent ones that included them."""
+    import hashlib
+    names = employers.names_from(os.environ.get("APPLYPILOT_DROP_EMPLOYERS"))
+    if not names:
+        return
+    resume = DATA_DIR / "resume.txt"
+    if resume.exists():
+        old = resume.read_text(encoding="utf-8")
+        new = employers.strip_text(old, names)
+        if new != old:
+            resume.write_text(new, encoding="utf-8")
+            # Dropping an employer doesn't change what fits: keep scores, but let resumes be rewritten.
+            from applypilot.scoring.scorer import SCORE_PROMPT_VERSION
+            marker = DATA_DIR / ".score_prompt_version"
+            old_hash = hashlib.sha256(old.encode()).hexdigest()[:16]
+            new_hash = hashlib.sha256(new.encode()).hexdigest()[:16]
+            if marker.exists() and marker.read_text().startswith(f"{SCORE_PROMPT_VERSION}:{old_hash}"):
+                marker.write_text(marker.read_text().replace(old_hash, new_hash, 1))
+            log(f"Removed {', '.join(names)} from the master resume")
+    form_path = DATA_DIR / "setup_form.json"
+    if form_path.exists():
+        try:
+            form = json.loads(form_path.read_text(encoding="utf-8"))
+            cleaned = employers.strip_list(form.get("companies", ""), names)
+            if cleaned != form.get("companies", ""):
+                form["companies"] = cleaned
+                form_path.write_text(json.dumps(form, indent=2), encoding="utf-8")
+                setup_form.rebuild_from_saved(DATA_DIR)
+                log(f"Removed {', '.join(names)} from the Setup companies list")
+        except (OSError, ValueError) as e:
+            log(f"Could not update the companies list: {e}")
+    # Resumes and cover letters not yet sent: rewrite them (hand-edited ones are fixed in place).
+    fixed = cleared = 0
+    for url, rpath, cpath, when in conn.execute(
+            "SELECT url, tailored_resume_path, cover_letter_path, tailored_at FROM jobs "
+            "WHERE applied_at IS NULL AND (tailored_resume_path IS NOT NULL OR cover_letter_path IS NOT NULL)"):
+        for kind, path in (("resume", rpath), ("cover", cpath)):
+            p = Path(path) if path else None
+            if not p or not p.exists() or not employers.mentions(p.read_text(encoding="utf-8"), names):
+                continue
+            if kind == "resume" and _edited_by_hand(path, when):
+                p.write_text(employers.strip_text(p.read_text(encoding="utf-8"), names), encoding="utf-8")
+                try:
+                    from applypilot.scoring.pdf import convert_to_pdf
+                    convert_to_pdf(p)
+                except Exception as e:  # noqa: BLE001 - the text is fixed; the PDF is rebuilt on the next edit
+                    log(f"Could not rebuild {p.name}: {e}")
+                fixed += 1
+            elif kind == "resume":
+                conn.execute("UPDATE jobs SET tailored_resume_path = NULL, tailored_at = NULL, tailor_attempts = 0 "
+                             "WHERE url = ?", (url,))
+                cleared += 1
+            else:
+                conn.execute("UPDATE jobs SET cover_letter_path = NULL, cover_letter_at = NULL, cover_attempts = 0 "
+                             "WHERE url = ?", (url,))
+                cleared += 1
+    conn.commit()
+    if fixed or cleared:
+        log(f"Removed {', '.join(names)} from {fixed} hand-edited resume(s); rewriting {cleared} document(s)")
+    # What already went out.
+    sent = conn.execute("SELECT title, company, site, application_url, applied_at, tailored_resume_path, "
+                        "cover_letter_path FROM jobs WHERE applied_at IS NOT NULL ORDER BY applied_at").fetchall()
+    hits = []
+    for title, company, site, app_url, when, rpath, cpath in sent:
+        where = []
+        for label, path in (("resume", rpath), ("cover letter", cpath)):
+            try:
+                if path and employers.mentions(Path(path).read_text(encoding="utf-8"), names):
+                    where.append(label)
+            except OSError:
+                pass
+        if where:
+            hits.append(f"{(when or '')[:10]} {title} at {company_for(company, site, app_url) or site} "
+                        f"({' and '.join(where)})")
+    log(f"Sent applications: {len(sent)} in total; {len(hits)} included {', '.join(names)}")
+    for h in hits:
+        log(f"  sent with {names[0]}: {h}")
+
+
 def requeue_failed_scores() -> None:
     """Send jobs whose scoring failed back for scoring.
 
@@ -145,6 +227,7 @@ def requeue_failed_scores() -> None:
         return
     try:
         conn = sqlite3.connect(db, timeout=10)
+        drop_employers(conn)
         n = conn.execute("UPDATE jobs SET fit_score = NULL, scored_at = NULL WHERE fit_score = 0").rowcount
         # Scoring instructions changed since these were scored: score again (keeps jobs that
         # already have a tailored resume).

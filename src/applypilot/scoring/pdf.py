@@ -114,31 +114,32 @@ def parse_entries(text: str) -> list[dict]:
     Returns:
         List of {"title": str, "subtitle": str, "bullets": list[str]} dicts.
     """
+    import re
+
     entries: list[dict] = []
     lines = text.strip().split("\n")
     current: dict | None = None
+    dates = re.compile(r"\b(19|20)\d\d\b|\bpresent\b|\|", re.I)
 
     for line in lines:
         stripped = line.strip()
         if not stripped:
+            # A blank line ends an entry, so a role with no bullets can't absorb the next one.
+            if current:
+                entries.append(current)
+                current = None
             continue
         if stripped.startswith("- ") or stripped.startswith("\u2022 "):
             if current:
                 current["bullets"].append(stripped[2:].strip())
-        elif current is None or (
-            not stripped.startswith("-")
-            and not stripped.startswith("\u2022")
-            and len(current.get("bullets", [])) > 0
-        ):
-            # New entry
+        elif (current and not current["subtitle"] and not current["bullets"]
+              and dates.search(stripped) and not dates.search(current["title"])):
+            current["subtitle"] = stripped  # the location/dates line under a title
+        else:
+            # Any other line starts the next entry (older roles are often a title and dates only).
             if current:
                 entries.append(current)
             current = {"title": stripped, "subtitle": "", "bullets": []}
-        elif current and not current["subtitle"]:
-            current["subtitle"] = stripped
-        else:
-            if current:
-                current["bullets"].append(stripped)
 
     if current:
         entries.append(current)
