@@ -414,7 +414,8 @@ def write_config(data_dir: Path, f: dict[str, str]) -> None:
             "available_for_contract": "No",
         },
         "compensation": {
-            "salary_expectation": f.get("salary_max") or f.get("salary_min", ""),
+            # The floor applications never go below: the minimum, falling back to the maximum.
+            "salary_expectation": f.get("salary_min") or f.get("salary_max", ""),
             "salary_currency": f.get("currency") or "USD",
             "salary_range_min": f.get("salary_min", ""),
             "salary_range_max": f.get("salary_max", ""),

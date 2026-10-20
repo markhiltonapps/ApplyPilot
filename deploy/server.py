@@ -251,6 +251,16 @@ def requeue_failed_scores() -> None:
                              "WHERE fit_score IS NOT NULL AND applied_at IS NULL").rowcount
             marker.write_text(version)
             log(f"Resume or scoring preferences changed; re-scoring {m} job(s)")
+        # Whenever the salary minimum is set or changed, re-score the good fits under it, so jobs whose posting
+        # states lower pay drop off Ready to apply.
+        floor = _min_salary()
+        salary_marker = DATA_DIR / ".rescore_salary"
+        if floor and (not salary_marker.exists() or salary_marker.read_text().strip() != str(floor)):
+            r = conn.execute("UPDATE jobs SET fit_score = NULL, scored_at = NULL WHERE applied_at IS NULL "
+                             "AND fit_score >= ? AND COALESCE(apply_status, '') != 'skipped'",
+                             (int(setup_form.saved_min_score(DATA_DIR)),)).rowcount
+            salary_marker.write_text(str(floor))
+            log(f"Re-checking {r} good-fit job(s) against the ${floor:,} salary minimum")
         # One-time: re-score the jobs on Ready to apply under the rule about where the candidate lives,
         # so remote jobs limited to other states drop off the list without hiding each by hand.
         location_marker = DATA_DIR / ".rescore_location_v1"
@@ -711,7 +721,7 @@ def _tailored_jobs() -> list:
             conn = sqlite3.connect(f"file:{db}?mode=ro", uri=True, timeout=5)
             conn.row_factory = sqlite3.Row
             jobs = conn.execute(
-                "SELECT title, site, company, location, url, application_url, fit_score, tailored_resume_path, "
+                "SELECT title, site, company, location, url, application_url, fit_score, salary, tailored_resume_path, "
                 "cover_letter_path, applied_at, apply_status, apply_error, COALESCE(apply_attempts, 0) AS apply_attempts "
                 "FROM jobs WHERE tailored_resume_path IS NOT NULL "
                 "AND (applied_at IS NOT NULL OR fit_score IS NULL OR fit_score >= ?) "
@@ -777,8 +787,11 @@ def ready_html(view: str = "") -> bytes:
     # The same posting found on two boards is listed once (jobs come best match first, so the best copy stays).
     todo, seen = [], set()
     hidden = [j for j in jobs if not j["applied_at"] and (j["apply_status"] or "") == "skipped"]
+    floor = _min_salary()
+    low_pay = [j for j in jobs if not j["applied_at"] and pays_below(j["salary"], floor)]
     for j in jobs:
-        if not j["applied_at"] and (j["apply_status"] or "") != "skipped" and _dup_key(j) not in seen:
+        if (not j["applied_at"] and (j["apply_status"] or "") != "skipped" and _dup_key(j) not in seen
+                and not pays_below(j["salary"], floor)):
             seen.add(_dup_key(j))
             todo.append(j)
     mine = [j for j in todo if needs_you(j) and _dup_key(j) not in applied_keys]
@@ -811,6 +824,9 @@ resume and cover letter are already written: click <b>Apply</b>, fill in the for
     if hidden:
         done_html += (f'<p class="muted small" style="margin-top:12px"><a href="/ready?view=hidden">{len(hidden)} '
                       f'job{"s" if len(hidden) != 1 else ""} hidden as Not for me</a></p>')
+    if low_pay:
+        done_html += (f'<p class="muted small" style="margin-top:6px">{len(low_pay)} job{"s" if len(low_pay) != 1 else ""} '
+                      f'left out because the listed pay is below your ${floor:,} minimum (Setup).</p>')
     body = f"""<h1>Ready to apply</h1>
 <p class="sub">{len(todo)} to apply, best match first{f", {len(done)} applied" if done else ""}. These are all
 jobs scoring {setup_form.saved_min_score(DATA_DIR)} or more ({sum(1 for j in todo if (j["fit_score"] or 0) >= 7)} of
@@ -896,6 +912,36 @@ def needs_account(url: str | None) -> bool:
     return bool(url) and any(site in url.lower() for site in ACCOUNT_SITES)
 
 
+def _min_salary() -> int:
+    try:
+        from applypilot.scoring.scorer import min_salary
+        return min_salary()
+    except Exception:  # noqa: BLE001 - no floor when the profile can't be read
+        return 0
+
+
+def pays_below(salary: str | None, floor: int) -> bool:
+    """Whether a listed pay range ('$75,000-$80,000/yearly', '$45-$60/hourly') tops out below the yearly floor."""
+    if not salary or not floor:
+        return False
+    amounts = [float(x.replace(",", "")) for x in re.findall(r"\d[\d,]*(?:\.\d+)?", salary)]
+    if not amounts:
+        return False
+    top = max(amounts)
+    low = salary.lower()
+    if "hour" in low:
+        top *= 2080
+    elif "month" in low:
+        top *= 12
+    elif "week" in low:
+        top *= 52
+    elif "day" in low:
+        top *= 260
+    elif top < 1000:  # an unlabeled small number is an hourly rate
+        top *= 2080
+    return top < floor
+
+
 def apply_candidates() -> tuple[list, int]:
     """Jobs auto-apply can take on, best first, and how many more were left out because they need an account."""
     import sqlite3
@@ -904,7 +950,7 @@ def apply_candidates() -> tuple[list, int]:
     conn = sqlite3.connect(f"file:{DATA_DIR / 'applypilot.db'}?mode=ro", uri=True, timeout=10)
     conn.row_factory = sqlite3.Row
     rows = conn.execute(
-        "SELECT url, title, site, company, location, application_url, fit_score, full_description, "
+        "SELECT url, title, site, company, location, application_url, fit_score, full_description, salary, "
         "tailored_resume_path, cover_letter_path, apply_error, COALESCE(apply_attempts, 0) AS apply_attempts "
         "FROM jobs WHERE tailored_resume_path IS NOT NULL AND applied_at IS NULL "
         f"AND (fit_score IS NULL OR fit_score >= {int(setup_form.saved_min_score(DATA_DIR))}) "
@@ -921,8 +967,9 @@ def apply_candidates() -> tuple[list, int]:
         if key not in seen:
             seen.add(key)
             unique.append(r)
+    floor = _min_salary()
     rows = [r for r in unique if not needs_account(r["application_url"] or r["url"])
-            and worth_retrying(r["apply_error"], r["apply_attempts"])]
+            and worth_retrying(r["apply_error"], r["apply_attempts"]) and not pays_below(r["salary"], floor)]
     conn.close()
     return rows, len(unique) - len(rows)
 

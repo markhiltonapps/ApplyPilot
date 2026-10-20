@@ -121,11 +121,27 @@ def _targets_line() -> str:
             _TARGETS += (f"\n- The candidate lives in {home} and will not relocate unless the job says relocation is "
                          "paid. A remote job open only to residents of particular states or regions that don't "
                          "include theirs, or an onsite or hybrid job far from where they live, scores 3 or lower.")
+        floor = min_salary()
+        if floor:
+            _TARGETS += (f"\n- The candidate's minimum base salary is ${floor:,} a year. If the posting states pay whose "
+                         f"top end is below that (count hourly pay as x2080), score 3 or lower however well the rest "
+                         "fits. If no pay is stated, ignore this.")
         if ai_only():
             _TARGETS += ("\n- The candidate ONLY wants roles where AI (machine learning, generative AI, LLMs, AI agents "
                          "or AI products) is central to the day-to-day work. If AI appears only in the company "
                          "description or is a minor part of the job, score 4 or lower however well the rest fits.")
     return _TARGETS
+
+
+def min_salary() -> int:
+    """The lowest yearly base salary the candidate accepts (Setup's salary minimum), or 0 when not set."""
+    try:
+        raw = str(load_profile().get("compensation", {}).get("salary_range_min") or "")
+    except (FileNotFoundError, ValueError):
+        return 0
+    digits = re.sub(r"[^0-9]", "", raw.split(".")[0])
+    value = int(digits) if digits else 0
+    return value if value >= 1000 else 0
 
 
 def ai_only() -> bool:
