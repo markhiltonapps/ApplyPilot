@@ -478,7 +478,7 @@ def tailor_resume(
             continue
 
         # Layer 1: Validate JSON fields
-        validation = validate_json_fields(data, profile, mode=validation_mode)
+        validation = validate_json_fields(data, profile, mode=validation_mode, base_text=resume_text)
         date_errors = _role_date_errors(data, resume_text)
         if date_errors:
             validation = {**validation, "passed": False,

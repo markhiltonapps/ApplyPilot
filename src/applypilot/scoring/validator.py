@@ -96,7 +96,7 @@ def sanitize_text(text: str) -> str:
 
 # ── JSON Field Validation ─────────────────────────────────────────────────
 
-def validate_json_fields(data: dict, profile: dict, mode: str = "normal") -> dict:
+def validate_json_fields(data: dict, profile: dict, mode: str = "normal", base_text: str = "") -> dict:
     """Validate individual JSON fields from an LLM-generated tailored resume.
 
     Args:
@@ -141,12 +141,19 @@ def validate_json_fields(data: dict, profile: dict, mode: str = "normal") -> dic
     preserved_companies = resume_facts.get("preserved_companies", [])
 
     if isinstance(data["experience"], list):
+        base_lower = base_text.lower()
         for company in preserved_companies:
             has_company = any(
                 company.lower() in str(e.get("header", "")).lower()
                 for e in data["experience"]
             )
-            if not has_company:
+            if has_company:
+                continue
+            if base_text and company.lower() not in base_lower:
+                # Listed in Setup under a name the master resume doesn't use (e.g. "Idea Communications Group" vs
+                # "Idea Group"): no resume could contain it, so failing would block every resume.
+                warnings.append(f"Company '{company}' is in Setup but not in the master resume under that name")
+            else:
                 errors.append(f"Company '{company}' missing from experience")
         for entry in data["experience"]:
             for b in entry.get("bullets", []):
