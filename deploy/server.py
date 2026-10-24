@@ -1030,6 +1030,28 @@ def apply_bundle() -> bytes:
     return buf.getvalue()
 
 
+def log_result(url: str, status: str, error: str) -> None:
+    """One log line per auto-apply outcome: which job, whether it needed an account, and what happened."""
+    import sqlite3
+    title, company, apply_url = "", "", url
+    try:
+        conn = sqlite3.connect(f"file:{DATA_DIR / 'applypilot.db'}?mode=ro", uri=True, timeout=10)
+        row = conn.execute("SELECT title, company, site, application_url FROM jobs WHERE url = ?", (url,)).fetchone()
+        conn.close()
+        if row:
+            title, company = row[0] or "", company_for(row[1], row[2], row[3]) or ""
+            apply_url = row[3] or url
+    except sqlite3.Error:
+        pass
+    site = " [account site]" if any(s in (apply_url or "").lower() for s in ACCOUNT_SITES) else ""
+    if status == "applied":
+        outcome = "applied"
+    else:
+        reason = error or status
+        outcome = f"couldn't finish: {FAILURE_WORDS.get(reason, reason.replace('_', ' '))[:120]}"
+    log(f"Auto-apply result: {title or url} at {company or '?'}{site}: {outcome}")
+
+
 def record_results(results: list[dict]) -> int:
     """Apply the companion's outcomes: real submissions become applied; failures are noted."""
     import sqlite3
@@ -1038,6 +1060,7 @@ def record_results(results: list[dict]) -> int:
         url, status = r.get("url"), (r.get("status") or "").strip()
         if not url or not status:
             continue
+        log_result(url, status, r.get("error") or "")
         if status == "applied":
             updated += mark_applied(url, True, "applied_auto", r.get("at"))
             continue
