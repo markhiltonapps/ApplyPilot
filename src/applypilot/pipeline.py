@@ -230,7 +230,8 @@ _PENDING_SQL: dict[str, str] = {
         "AND COALESCE(tailor_attempts, 0) < 5"
     ),
     "cover": (
-        "SELECT COUNT(*) FROM jobs WHERE tailored_resume_path IS NOT NULL "
+        "SELECT COUNT(*) FROM jobs WHERE fit_score >= ? AND tailored_resume_path IS NOT NULL "
+        "AND full_description IS NOT NULL "
         "AND (cover_letter_path IS NULL OR cover_letter_path = '') "
         "AND COALESCE(cover_attempts, 0) < 5"
     ),
@@ -306,15 +307,19 @@ def _run_stage_streaming(
             except Exception as e:
                 log.error("Stage '%s' error (pass %d): %s", stage, passes, e)
                 passes += 1
-        else:
-            # No work right now
-            upstream_done = upstream is None or tracker.is_done(upstream)
-            if upstream_done:
-                # No work and upstream is done — this stage is finished
-                break
-            # Upstream still running, wait and retry
-            if stop_event.wait(timeout=_STREAM_POLL_INTERVAL):
-                break  # Stop requested
+            if _count_pending(stage, min_score) < pending:
+                continue  # made progress; look for more right away
+            # The pass did nothing (the count includes items the stage skips, e.g. resumes that already have
+            # PDFs), so treat it like no work rather than spinning on it.
+
+        # No work right now
+        upstream_done = upstream is None or tracker.is_done(upstream)
+        if upstream_done:
+            # No work and upstream is done — this stage is finished
+            break
+        # Upstream still running, wait and retry
+        if stop_event.wait(timeout=_STREAM_POLL_INTERVAL):
+            break  # Stop requested
 
     tracker.mark_done(stage, {"status": "ok", "passes": passes})
 

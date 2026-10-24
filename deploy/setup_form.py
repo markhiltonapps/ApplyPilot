@@ -239,6 +239,21 @@ def _saved_form(data_dir: Path) -> dict[str, str]:
     return {}
 
 
+SITE_PASSWORD_FILE = ".site_password"
+
+
+def site_password(data_dir: Path) -> str:
+    """The password auto-apply signs in to (or creates) company job site accounts with, if one is saved."""
+    path = data_dir / SITE_PASSWORD_FILE
+    return path.read_text(encoding="utf-8").strip() if path.exists() else ""
+
+
+def _save_site_password(data_dir: Path, password: str) -> None:
+    path = data_dir / SITE_PASSWORD_FILE
+    path.write_text(password, encoding="utf-8")
+    path.chmod(0o600)
+
+
 def _check_gemini_key(key: str) -> str | None:
     """Return an error message if Google rejects the key, None if it works or can't be checked."""
     import httpx
@@ -344,6 +359,16 @@ def save(data_dir: Path, fields: dict[str, str], files: dict[str, tuple[str, byt
         else:
             errors.append("Add your Gemini API key.")
 
+    # Job site password (kept even if other fields have errors, like the key)
+    password = fields.get("site_password", "").strip()
+    if f.get("clear_site_password"):
+        (data_dir / SITE_PASSWORD_FILE).unlink(missing_ok=True)
+    elif password:
+        if len(password) < 8:
+            errors.append("Make the job site password at least 8 characters.")
+        else:
+            _save_site_password(data_dir, password)
+
     for name, label in (("full_name", "Full name"), ("email", "Email"), ("city", "City"),
                         ("country", "Country"), ("titles", "Job titles")):
         if not f.get(name):
@@ -356,7 +381,8 @@ def save(data_dir: Path, fields: dict[str, str], files: dict[str, tuple[str, byt
     if errors:
         return errors
 
-    stored = {k: v for k, v in f.items() if k not in ("gemini_key", "openrouter_key", "resume_text")}
+    stored = {k: v for k, v in f.items() if k not in ("gemini_key", "openrouter_key", "resume_text", "site_password",
+                                                 "clear_site_password")}
     (data_dir / "setup_form.json").write_text(json.dumps(stored, indent=2), encoding="utf-8")
     write_config(data_dir, stored)
     return []
@@ -400,7 +426,7 @@ def write_config(data_dir: Path, f: dict[str, str]) -> None:
             "github_url": "",
             "portfolio_url": f.get("website_url", ""),
             "website_url": f.get("website_url", ""),
-            "password": "",
+            "password": site_password(data_dir),
         },
         "work_authorization": {
             "legally_authorized_to_work": yes_no.get(f.get("authorized", "yes"), "Yes"),
@@ -549,10 +575,18 @@ def render(data_dir: Path, environ: dict, values: dict[str, str] | None = None,
                '3. Open <a href="https://openrouter.ai/settings/keys" target="_blank">Keys</a>, tap <b>Create</b>, '
                'copy the key (starts with sk-or-) and paste it here.')
 
+    pw_saved = bool(site_password(data_dir))
+    pw_hint = ("✅ Password saved. Leave blank to keep it, or type a new one to change it." if pw_saved else
+               "Optional. Many company job sites (Workday and similar) need an account before you can apply. With a "
+               "password here, auto-apply signs in with your email and this password, or creates the account if "
+               "there isn't one. Without it, those jobs are left for you to do by hand.")
+    pw_clear = (check("clear_site_password", "Remove the saved password", False) if pw_saved else "")
+
     top = ""
     if errors:
         kept = [name for name, ok in (("resume", (data_dir / "resume.txt").exists()),
-                                      ("API key", has_llm_key(data_dir, environ))) if ok]
+                                      ("API key", has_llm_key(data_dir, environ)),
+                                      ("job site password", site_password(data_dir))) if ok]
         kept_note = (f"<p>Your {' and '.join(kept)} {'are' if len(kept) > 1 else 'is'} saved, "
                      "so you don't need to add them again.</p>") if kept else ""
         top = '<div class="errors"><b>Almost there. Please fix:</b><ul>' + "".join(
@@ -604,6 +638,12 @@ document.querySelectorAll('.pk').forEach(function(d){{d.style.display=d.dataset.
 <div>{text("postal_code", "ZIP / postal code")}</div></div>
 {text("linkedin_url", "LinkedIn URL", "url")}
 {text("website_url", "Website or portfolio", "url")}
+<label for="site_password">Job site password</label>
+<input type="password" id="site_password" name="site_password" autocomplete="new-password"
+ placeholder="{"••••••••" if pw_saved else "A new password just for job sites"}">
+<p class="hint">{pw_hint} Use a new password you don&rsquo;t use anywhere else: the AI applying for you can see it.
+12+ characters with an uppercase letter, a lowercase letter, a number and a symbol (e.g. ! or #) meets almost every
+site&rsquo;s rules.</p>{pw_clear}
 </fieldset>
 
 <fieldset><legend>4. Jobs you want</legend>

@@ -867,8 +867,8 @@ def package_tarball() -> bytes:
     return _package_cache
 
 
-# Application sites that require creating an account (usually with an emailed code) before applying.
-# Auto-apply can't get past those, so they're left for the person to do by hand.
+# Application sites that require creating an account (often with an emailed code) before applying.
+# Without a job site password auto-apply can't get past those, so they're left for the person to do by hand.
 ACCOUNT_SITES = ("myworkdayjobs.com", "workday.com", "oraclecloud.com", "taleo.net", "successfactors",
                  "paycomonline.net", "icims.com", "ultipro.com", "brassring.com")
 
@@ -909,7 +909,30 @@ def worth_retrying(error: str | None, attempts: int | None) -> bool:
 
 
 def needs_account(url: str | None) -> bool:
-    return bool(url) and any(site in url.lower() for site in ACCOUNT_SITES)
+    """Whether auto-apply must leave this job to the person because the site needs an account and there's no
+    job site password in Setup to sign in or create one with."""
+    return (bool(url) and any(site in url.lower() for site in ACCOUNT_SITES)
+            and not setup_form.site_password(DATA_DIR))
+
+
+def retry_account_jobs() -> int:
+    """Once a job site password is saved or changed, put the jobs auto-apply gave up on for lack of one back in
+    its queue. Returns how many."""
+    import sqlite3
+    if not (DATA_DIR / "applypilot.db").exists():
+        return 0
+    try:
+        conn = sqlite3.connect(DATA_DIR / "applypilot.db", timeout=10)
+        n = conn.execute(
+            "UPDATE jobs SET apply_status = NULL, apply_error = NULL WHERE applied_at IS NULL "
+            "AND COALESCE(apply_status, '') NOT IN ('manual', 'expired', 'skipped') "
+            "AND (apply_error LIKE 'account_required%' OR apply_error LIKE 'login_issue%')").rowcount
+        conn.commit()
+        conn.close()
+        return n
+    except sqlite3.Error as e:
+        log(f"Could not re-queue jobs that needed an account: {e}")
+        return 0
 
 
 def _min_salary() -> int:
@@ -1215,9 +1238,11 @@ the companion</a></div></div>"""
 {hidden}<input type="hidden" name="mode" value="real"><input type="hidden" name="confirm" value="yes">
 <button class="btn primary sm"{dis}>Apply</button></form></div></div>""")
         more = f'<p class="muted small" style="margin:10px 0 0">...and {len(jobs) - 40} more.</p>' if len(jobs) > 40 else ""
-        acct = (f'<p class="muted small" style="margin:10px 0 0">{account_only} more need an account on the company&rsquo;s '
-                f'site (Workday and similar), so they&rsquo;re left for you on <a href="/ready">Ready to apply</a>.</p>'
-                if account_only else "")
+        why_left = ("are left for you (pay below your minimum, or ones auto-apply already couldn&rsquo;t finish)"
+                    if setup_form.site_password(DATA_DIR) else
+                    "need an account on the company&rsquo;s site (Workday and similar), so they&rsquo;re left for you")
+        acct = (f'<p class="muted small" style="margin:10px 0 0">{account_only} more {why_left} on '
+                f'<a href="/ready">Ready to apply</a>.</p>' if account_only else "")
         why_off = "" if ready else ('<p class="muted small" style="margin:0 0 10px">Buttons turn on when your PC is '
                                     'connected and nothing else is running.</p>')
         controls = f"""<div class="card">
@@ -1265,8 +1290,11 @@ on it starts by itself whenever Windows starts, and you never need PowerShell ag
 <ul class="muted small" style="margin:12px 0 0;padding-left:20px">
 <li>It answers with your Setup details (salary, start date, work authorization, voluntary questions), so keep them
 current.</li>
-<li>Sites that need an account, a CAPTCHA, or an emailed code are left for you to finish by hand; the job card on
-Ready to apply says why.</li>
+<li>{"Sites that need an account: it signs in, or creates the account, with your email and the job site password "
+"from Setup." if setup_form.site_password(DATA_DIR) else
+"Sites that need an account are left for you, unless you add a job site password in Setup."} Sites with a CAPTCHA
+it can&rsquo;t solve, or that email you a code, are left for you to finish by hand; the job card on Ready to apply says
+why.</li>
 <li>It uses your Claude subscription through Claude Code; each application is a few minutes of Claude&rsquo;s work.</li>
 <li>Keep the PC awake while it runs, and don&rsquo;t use the Chrome window it opens.</li>
 </ul></details>"""
@@ -1592,7 +1620,10 @@ class Handler(BaseHTTPRequestHandler):
             return self._send(413, page("Too large", "<p>That upload is too large (10 MB max).</p>"))
         body = self.rfile.read(length)
         fields, files = setup_form.parse_multipart(self.headers.get("Content-Type", ""), body)
+        password = setup_form.site_password(DATA_DIR)
         errors = setup_form.save(DATA_DIR, fields, files, os.environ)
+        if setup_form.site_password(DATA_DIR) not in ("", password):
+            log(f"Job site password saved: {retry_account_jobs()} job(s) that needed an account are queued again")
         if errors:
             log(f"Setup form not complete: {errors}")
             return self._send(200, page("ApplyPilot setup",
