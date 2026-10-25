@@ -742,9 +742,11 @@ def applied_html() -> bytes:
 up here with the resume and cover letter that went with it.</p><a class="btn ghost" href="/ready">Go to Ready to
 apply</a></div>"""
         return page("Applied", body, "applied")
+    auto = sum(1 for j in done if (j["apply_status"] or "") == "applied_auto")
     body = f"""<h1>Applied</h1>
-<p class="sub">{len(done)} application{'s' if len(done) != 1 else ''}, newest first, with the resume and cover letter
-you sent. Tap <b>Undo</b> to move one back to Ready to apply.</p>
+<p class="sub">{len(done)} application{'s' if len(done) != 1 else ''} ({auto} by auto-apply, {len(done) - auto} you
+marked by hand), newest first, with the resume and cover letter you sent. Tap <b>Undo</b> to move one back to Ready to
+apply.</p>
 <div class="stack">{"".join(_job_card(j, keys) for j in done)}</div>"""
     return page("Applied", body, "applied")
 
@@ -1165,14 +1167,17 @@ def run_summary(mode: str, results: list[dict], stopped: bool) -> tuple[str, boo
             return f"Practice stopped: {why(other[0])}. You can apply to that job by hand.", False
         return ("Stopped." if stopped else "Practice ended without finishing the form."), False
     parts = []
+    if results:
+        parts.append(f"Tried {len(results)} job{'s' if len(results) != 1 else ''}: {len(done)} applied, "
+                     f"{len(other)} couldn't be finished.")
     if done:
-        parts.append(f"Applied to {len(done)} job{'s' if len(done) != 1 else ''}; "
-                     f"{'they are' if len(done) != 1 else 'it is'} on the Applied tab.")
+        parts.append(f"The {len(done)} applied {'are' if len(done) != 1 else 'is'} on the Applied tab.")
     if other:
         from collections import Counter
         counts = Counter(why(r).strip() for r in other).most_common()
-        reasons = "; ".join(f"{reason} ({n})" if n > 1 else reason for reason, n in counts)
-        parts.append(f"{len(other)} couldn't be finished: {reasons}. They stay on Ready to apply to do by hand.")
+        reasons = "; ".join(f"{reason} ({n})" for reason, n in counts)
+        parts.append(f"Why the {len(other)} weren't finished: {reasons}. Closed postings and ones not open to your "
+                     "location are taken off your list; the rest wait under Ready to apply → Needs you.")
     if stopped:
         parts.append("You stopped the run.")
     return (" ".join(parts) or "Nothing was submitted."), bool(done)
