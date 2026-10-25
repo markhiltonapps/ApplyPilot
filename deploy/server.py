@@ -40,6 +40,7 @@ from urllib.parse import parse_qs, unquote, urlparse
 import agent_control
 import editor
 import employers
+import job_summary
 import onboarding
 import setup_form
 import ui
@@ -723,8 +724,8 @@ def _tailored_jobs() -> list:
             jobs = conn.execute(
                 "SELECT title, site, company, location, url, application_url, fit_score, salary, tailored_resume_path, "
                 "cover_letter_path, applied_at, apply_status, apply_error, COALESCE(apply_attempts, 0) AS apply_attempts "
-                "FROM jobs WHERE tailored_resume_path IS NOT NULL "
-                "AND (applied_at IS NOT NULL OR fit_score IS NULL OR fit_score >= ?) "
+                "FROM jobs WHERE applied_at IS NOT NULL OR (tailored_resume_path IS NOT NULL "
+                "AND (fit_score IS NULL OR fit_score >= ?)) "
                 "ORDER BY fit_score DESC, tailored_at DESC", (int(setup_form.saved_min_score(DATA_DIR)),)).fetchall()
             conn.close()
         except sqlite3.Error as e:
@@ -732,7 +733,125 @@ def _tailored_jobs() -> list:
     return jobs
 
 
-def applied_html() -> bytes:
+def _applied_details() -> dict[str, tuple[str, str]]:
+    """For each job applied to: (what the job is, pay the posting mentions), keyed by URL."""
+    import sqlite3
+    db = DATA_DIR / "applypilot.db"
+    out: dict[str, tuple[str, str]] = {}
+    if not db.exists():
+        return out
+    try:
+        conn = sqlite3.connect(f"file:{db}?mode=ro", uri=True, timeout=5)
+        has_summary = "job_summary" in {r[1] for r in conn.execute("PRAGMA table_info(jobs)")}
+        for url, summary, desc in conn.execute(
+                f"SELECT url, {'job_summary' if has_summary else 'NULL'}, full_description FROM jobs "
+                "WHERE applied_at IS NOT NULL"):
+            out[url] = (summary or job_summary.opening(desc), job_summary.pay_in(desc))
+        conn.close()
+    except sqlite3.Error as e:
+        log(f"Applied details query failed: {e}")
+    return out
+
+
+def _sheet_rows(done: list) -> list[dict[str, str]]:
+    """The Applied spreadsheet: one row per application, newest first."""
+    details = _applied_details()
+    rows = []
+    for j in done:
+        what, posted_pay = details.get(j["url"], ("", ""))
+        pay = j["salary"] or (f"{posted_pay} (from posting)" if posted_pay else "Not listed")
+        rows.append({
+            "applied": (j["applied_at"] or "")[:10],
+            "company": company_for(j["company"], j["site"], j["application_url"]) or "",
+            "title": j["title"] or "",
+            "score": str(j["fit_score"] or ""),
+            "salary": pay,
+            "location": j["location"] or "",
+            "summary": what,
+            "how": "Auto-apply" if (j["apply_status"] or "") == "applied_auto" else "By hand",
+            "posting": j["url"] or j["application_url"] or "",
+            "apply": j["application_url"] or "",
+            "resume": _doc_href(j["tailored_resume_path"]) or "",
+            "cover": _doc_href(j["cover_letter_path"]) or "",
+        })
+    return rows
+
+
+def applied_csv() -> bytes:
+    """The Applied spreadsheet as a CSV file that opens in Excel."""
+    import csv
+    import io
+    jobs = _tailored_jobs()
+    done = sorted((j for j in jobs if j["applied_at"]), key=lambda j: j["applied_at"], reverse=True)
+    buf = io.StringIO()
+    w = csv.writer(buf)
+    w.writerow(["Applied", "Company", "Job title", "Fit score", "Salary", "Location", "What the job is",
+                "How", "Job posting", "Application page"])
+    for r in _sheet_rows(done):
+        w.writerow([r["applied"], r["company"], r["title"], r["score"], r["salary"], r["location"], r["summary"],
+                    r["how"], r["posting"], r["apply"]])
+    return ("\ufeff" + buf.getvalue()).encode("utf-8")  # the BOM tells Excel it's UTF-8
+
+
+SHEET_CSS = """<style>
+.wrap:has(.sheet-wrap){max-width:1400px}
+.sheet-tools{display:flex;gap:10px;flex-wrap:wrap;align-items:center;margin:0 0 12px}
+.sheet-tools input{flex:1 1 180px;min-width:0;max-width:360px;margin:0;padding:9px 12px;border-radius:10px;
+  border:1px solid var(--line);background:var(--field);color:var(--text);font:inherit;font-size:14px}
+.sheet-wrap{overflow-x:auto;max-width:100%;border:1px solid var(--line);border-radius:12px;background:var(--surface)}
+table.sheet{border-collapse:collapse;width:100%;min-width:980px;font-size:13.5px}
+.sheet th,.sheet td{padding:9px 10px;border-bottom:1px solid var(--line);text-align:left;vertical-align:top}
+.sheet th{position:sticky;top:0;background:var(--surface);cursor:pointer;white-space:nowrap;font-size:12.5px;
+  color:var(--muted);user-select:none}
+.sheet th:hover{color:var(--text)}
+.sheet tr:last-child td{border-bottom:0}
+.sheet td.num{white-space:nowrap;font-variant-numeric:tabular-nums}
+.sheet td.sum{min-width:260px;max-width:420px;color:var(--muted)}
+.sheet td.links{white-space:nowrap}
+.sheet td.links a{margin-right:8px}
+</style>"""
+
+
+def _sheet_html(rows: list[dict[str, str]], auto: int) -> str:
+    esc = html.escape
+    body_rows = []
+    for i, r in enumerate(rows, 1):
+        links = [f'<a href="{esc(r["posting"], quote=True)}" target="_blank" rel="noopener">Job</a>' if r["posting"]
+                 else "",
+                 f'<a href="{esc(r["resume"], quote=True)}" target="_blank">Resume</a>' if r["resume"] else "",
+                 f'<a href="{esc(r["cover"], quote=True)}" target="_blank">Cover letter</a>' if r["cover"] else ""]
+        body_rows.append(
+            f'<tr><td class="num">{i}</td><td class="num">{esc(r["applied"])}</td><td>{esc(r["company"])}</td>'
+            f'<td><b>{esc(r["title"])}</b></td><td class="num">{esc(r["score"])}</td>'
+            f'<td class="num">{esc(r["salary"])}</td><td>{esc(r["location"])}</td>'
+            f'<td class="sum">{esc(r["summary"])}</td><td>{esc(r["how"])}</td>'
+            f'<td class="links">{"".join(links)}</td></tr>')
+    heads = ["#", "Applied", "Company", "Job title", "Score", "Salary", "Location", "What the job is", "How", "Links"]
+    return f"""<div class="sheet-tools"><input type="search" id="sheet-q" placeholder="Search company, title, location…">
+<a class="btn ghost sm" href="/applied.csv">Download for Excel</a></div>
+<p class="muted small" id="sheet-count" style="margin:0 0 8px">Showing all {len(rows)}: {auto} by auto-apply +
+{len(rows) - auto} by hand.</p>
+<div class="sheet-wrap"><table class="sheet" id="sheet"><thead><tr>{"".join(f"<th>{h}</th>" for h in heads)}</tr>
+</thead><tbody>{"".join(body_rows)}</tbody></table></div>
+<p class="muted small" style="margin-top:10px">Click a column heading to sort. &ldquo;What the job is&rdquo; is a short
+summary the AI writes after you apply (the posting&rsquo;s opening lines until then). Salary comes from the job board,
+or from the posting when the board didn&rsquo;t list one.</p>
+<script>
+(function(){{var t=document.getElementById('sheet'),q=document.getElementById('sheet-q'),
+c=document.getElementById('sheet-count'),total={len(rows)};
+q.addEventListener('input',function(){{var v=q.value.toLowerCase(),n=0;
+t.tBodies[0].querySelectorAll('tr').forEach(function(r){{var on=r.textContent.toLowerCase().indexOf(v)>=0;
+r.style.display=on?'':'none';if(on)n++}});
+c.textContent=v?('Showing '+n+' of '+total+' that match.'):c.dataset.all}});c.dataset.all=c.textContent;
+t.querySelectorAll('th').forEach(function(th,i){{var asc=false;th.addEventListener('click',function(){{asc=!asc;
+var rs=[].slice.call(t.tBodies[0].rows);rs.sort(function(a,b){{var x=a.cells[i].textContent.trim(),
+y=b.cells[i].textContent.trim(),nx=parseFloat(x.replace(/[$,]/g,'')),ny=parseFloat(y.replace(/[$,]/g,''));
+var r=(!isNaN(nx)&&!isNaN(ny))?nx-ny:x.localeCompare(y);return asc?r:-r}});
+rs.forEach(function(r){{t.tBodies[0].appendChild(r)}})}})}})}})();
+</script>"""
+
+
+def applied_html(view: str = "") -> bytes:
     jobs = _tailored_jobs()
     done = sorted((j for j in jobs if j["applied_at"]), key=lambda j: j["applied_at"], reverse=True)
     keys = {_dup_key(j) for j in done}
@@ -743,12 +862,18 @@ up here with the resume and cover letter that went with it.</p><a class="btn gho
 apply</a></div>"""
         return page("Applied", body, "applied")
     auto = sum(1 for j in done if (j["apply_status"] or "") == "applied_auto")
-    body = f"""<h1>Applied</h1>
-<p class="sub">{len(done)} application{'s' if len(done) != 1 else ''} ({auto} by auto-apply, {len(done) - auto} you
-marked by hand), newest first, with the resume and cover letter you sent. Tap <b>Undo</b> to move one back to Ready to
-apply.</p>
+    table = view == "table"
+    tabs = (f'<div class="tabs"><a href="/applied"{"" if table else " class=on"}>Cards</a>'
+            f'<a href="/applied?view=table"{" class=on" if table else ""}>Spreadsheet</a></div>')
+    sub = (f'<p class="sub">{len(done)} application{"s" if len(done) != 1 else ""} ({auto} by auto-apply, '
+           f'{len(done) - auto} you marked by hand), newest first')
+    if table:
+        body = (f'<h1>Applied</h1>{tabs}{sub}.</p>' + _sheet_html(_sheet_rows(done), auto))
+        return page("Applied", body, "applied", READY_CSS + SHEET_CSS)
+    body = f"""<h1>Applied</h1>{tabs}{sub}, with the resume and cover letter you sent. Tap <b>Undo</b> to move one
+back to Ready to apply.</p>
 <div class="stack">{"".join(_job_card(j, keys) for j in done)}</div>"""
-    return page("Applied", body, "applied")
+    return page("Applied", body, "applied", READY_CSS)
 
 
 # Reasons a job isn't worth doing at all (closed, wrong kind of role), as opposed to ones that need a person.
@@ -1475,7 +1600,12 @@ class Handler(BaseHTTPRequestHandler):
             view = parse_qs(urlparse(self.path).query).get("view", [""])[0]
             return self._send(200, ready_html(view))
         if path == "/applied":
-            return self._send(200, applied_html())
+            view = parse_qs(urlparse(self.path).query).get("view", [""])[0]
+            return self._send(200, applied_html(view))
+        if path == "/applied.csv":
+            name = f"applications-{datetime.now(UTC).strftime('%Y-%m-%d')}.csv"
+            return self._send(200, applied_csv(), "text/csv; charset=utf-8",
+                              {"Content-Disposition": f'attachment; filename="{name}"'})
         if path == "/status.json":
             with _state_lock:
                 return self._send(200, json.dumps(state).encode(), "application/json")
@@ -1534,6 +1664,7 @@ class Handler(BaseHTTPRequestHandler):
                 return self._send(400, b'{"error": "bad json"}', "application/json")
             n = record_results(results if isinstance(results, list) else [])
             log(f"Companion reported {len(results)} result(s), {n} recorded")
+            _summaries_due.set()
             return self._send(200, json.dumps({"updated": n}).encode(), "application/json")
         if path == "/mark":
             length = int(self.headers.get("Content-Length") or 0)
@@ -1544,6 +1675,7 @@ class Handler(BaseHTTPRequestHandler):
                 set_skipped(url, action == "skip")
             else:
                 mark_applied(url, action == "applied")
+                _summaries_due.set()
             referer = self.headers.get("Referer") or ""
             back = ("/applied" if "/applied" in referer else "/autoapply" if "/autoapply" in referer
                     else "/ready?view=needs" if "view=needs" in referer
@@ -1689,6 +1821,23 @@ class Handler(BaseHTTPRequestHandler):
         self._send(200, page("ApplyPilot setup", setup_form.render(DATA_DIR, os.environ, saved=True), "setup"))
 
 
+_summaries_due = threading.Event()
+
+
+def summarize_applied() -> None:
+    """Keep writing the short 'what the job is' summaries for the Applied spreadsheet, a few at a time."""
+    while True:
+        try:
+            env = {**os.environ, **setup_form._env_values(DATA_DIR)}
+            n = job_summary.fill(DATA_DIR / "applypilot.db", env)
+            if n:
+                log(f"Wrote {n} job summary(ies) for the Applied spreadsheet")
+        except Exception as e:  # noqa: BLE001 - the posting's opening lines are shown until this works
+            log(f"Couldn't write job summaries: {e}")
+        _summaries_due.wait(600)
+        _summaries_due.clear()
+
+
 def relayout_cover_letters() -> None:
     """Once: re-render existing cover letter PDFs in the letter layout (they used the resume layout before)."""
     marker = DATA_DIR / ".cl_layout_v1"
@@ -1734,6 +1883,7 @@ def main() -> None:
 
     threading.Thread(target=relayout_cover_letters, daemon=True).start()
     threading.Thread(target=scheduler, daemon=True).start()
+    threading.Thread(target=summarize_applied, daemon=True).start()
     httpd = ThreadingHTTPServer(("0.0.0.0", PORT), Handler)
     log(f"Listening on :{PORT} (data dir {DATA_DIR}, interval {INTERVAL_HOURS}h)")
     httpd.serve_forever()
