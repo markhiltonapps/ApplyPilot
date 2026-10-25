@@ -755,6 +755,19 @@ DEAD_END_WORDS = ("expired", "closed", "no_longer", "contract", "1099", "freelan
                   "not_a_job", "no_job_url", "no job url")
 
 
+# Auto-apply outcomes that mean the job can't be applied to at all: the posting closed, or it isn't open to
+# where you live. Those leave Ready to apply (they're listed under Hidden) and are never tried again.
+GONE_WORDS = ("expired", "closed", "no_longer", "location")
+
+
+def gone(j) -> bool:
+    """Auto-apply found this posting closed or not open to your location."""
+    if j["applied_at"] or (j["apply_status"] or "") in ("applied", "applied_auto", "in_progress"):
+        return False
+    reason = (j["apply_error"] or j["apply_status"] or "").lower()
+    return any(w in reason for w in GONE_WORDS)
+
+
 def needs_you(j) -> bool:
     """Auto-apply has done what it can: this job is waiting on the person (an account, a CAPTCHA, a stuck form)."""
     if j["applied_at"]:
@@ -787,11 +800,13 @@ def ready_html(view: str = "") -> bytes:
     # The same posting found on two boards is listed once (jobs come best match first, so the best copy stays).
     todo, seen = [], set()
     hidden = [j for j in jobs if not j["applied_at"] and (j["apply_status"] or "") == "skipped"]
+    closed = [j for j in jobs if (j["apply_status"] or "") != "skipped" and gone(j)]
+    seen.update(_dup_key(j) for j in closed)  # the same posting listed on another board is closed too
     floor = _min_salary()
     low_pay = [j for j in jobs if not j["applied_at"] and pays_below(j["salary"], floor)]
     for j in jobs:
         if (not j["applied_at"] and (j["apply_status"] or "") != "skipped" and _dup_key(j) not in seen
-                and not pays_below(j["salary"], floor)):
+                and not gone(j) and not pays_below(j["salary"], floor)):
             seen.add(_dup_key(j))
             todo.append(j)
     mine = [j for j in todo if needs_you(j) and _dup_key(j) not in applied_keys]
@@ -802,9 +817,13 @@ def ready_html(view: str = "") -> bytes:
     if view == "hidden":
         cards = "".join(_job_card(j, applied_keys) for j in hidden) or (
             '<div class="card empty"><h2>No hidden jobs</h2></div>')
+        gone_html = (f'<h2 style="margin-top:24px">Closed or not open to your location</h2><p class="sub">{len(closed)} '
+                     f'job{"s" if len(closed) != 1 else ""} auto-apply found closed, or limited to people in another '
+                     f'area. They&rsquo;re off your list and won&rsquo;t be tried again.</p><div class="stack">'
+                     + "".join(_job_card(j, applied_keys) for j in closed) + "</div>" if closed else "")
         body = f"""<h1>Ready to apply</h1>{tabs}
 <p class="sub">{len(hidden)} job{"s" if len(hidden) != 1 else ""} you marked <b>Not for me</b>. Auto-apply skips
-these. Click <b>Bring it back</b> to put one back on the list.</p><div class="stack">{cards}</div>"""
+these. Click <b>Bring it back</b> to put one back on the list.</p><div class="stack">{cards}</div>{gone_html}"""
         return page("Hidden jobs", body, "ready", READY_CSS)
     if view == "needs":
         cards = "".join(_job_card(j, applied_keys) for j in mine) or (
@@ -824,6 +843,10 @@ resume and cover letter are already written: click <b>Apply</b>, fill in the for
     if hidden:
         done_html += (f'<p class="muted small" style="margin-top:12px"><a href="/ready?view=hidden">{len(hidden)} '
                       f'job{"s" if len(hidden) != 1 else ""} hidden as Not for me</a></p>')
+    if closed:
+        done_html += (f'<p class="muted small" style="margin-top:6px"><a href="/ready?view=hidden">{len(closed)} '
+                      f'job{"s" if len(closed) != 1 else ""} removed because the posting closed or isn&rsquo;t open to '
+                      f'your location</a></p>')
     if low_pay:
         done_html += (f'<p class="muted small" style="margin-top:6px">{len(low_pay)} job{"s" if len(low_pay) != 1 else ""} '
                       f'left out because the listed pay is below your ${floor:,} minimum (Setup).</p>')
@@ -878,7 +901,7 @@ HAND_ONLY_REASONS = ("login_issue", "account_required", "sso_required", "expired
                      "not_a_job_application", "not_eligible_location", "not_eligible_salary",
                      "not_eligible_work_auth", "captcha", "email_verification")
 FAILURE_WORDS = {
-    "login_issue": "the site needs an account",
+    "login_issue": "couldn't sign in or create the account",
     "account_required": "the site needs an account",
     "sso_required": "the site needs a Google or Microsoft sign-in",
     "expired": "the posting has closed",
@@ -1036,8 +1059,11 @@ def log_result(url: str, status: str, error: str) -> None:
     title, company, apply_url = "", "", url
     try:
         conn = sqlite3.connect(f"file:{DATA_DIR / 'applypilot.db'}?mode=ro", uri=True, timeout=10)
-        row = conn.execute("SELECT title, company, site, application_url FROM jobs WHERE url = ?", (url,)).fetchone()
+        row = conn.execute("SELECT title, company, site, application_url, applied_at FROM jobs WHERE url = ?",
+                           (url,)).fetchone()
         conn.close()
+        if row and status == "applied" and row[4]:
+            return  # already recorded; the companion re-sends submitted jobs each round
         if row:
             title, company = row[0] or "", company_for(row[1], row[2], row[3]) or ""
             apply_url = row[3] or url
