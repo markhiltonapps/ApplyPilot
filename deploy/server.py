@@ -757,13 +757,23 @@ def _applied_details() -> dict[str, tuple[str, str]]:
     return out
 
 
+def _tidy_pay(text: str) -> str:
+    """'USD184,000-USD356,500/yearly' reads as '$184,000 – $356,500 a year'."""
+    t = re.sub(r"\bUSD\s?", "$", text)
+    t = re.sub(r"\s*-\s*(?=\$)", " – ", t)
+    for raw, nice in (("/yearly", " a year"), ("/hourly", " an hour"), ("/monthly", " a month"),
+                      ("/weekly", " a week"), ("/daily", " a day")):
+        t = t.replace(raw, nice)
+    return t
+
+
 def _sheet_rows(done: list) -> list[dict[str, str]]:
     """The Applied spreadsheet: one row per application, newest first."""
     details = _applied_details()
     rows = []
     for j in done:
         what, posted_pay = details.get(j["url"], ("", ""))
-        pay = j["salary"] or (f"{posted_pay} (from posting)" if posted_pay else "Not listed")
+        pay = _tidy_pay(j["salary"]) if j["salary"] else (f"{posted_pay} (from posting)" if posted_pay else "Not listed")
         rows.append({
             "applied": (j["applied_at"] or "")[:10],
             "company": company_for(j["company"], j["site"], j["application_url"]) or "",
@@ -803,16 +813,19 @@ SHEET_CSS = """<style>
 .sheet-tools input{flex:1 1 180px;min-width:0;max-width:360px;margin:0;padding:9px 12px;border-radius:10px;
   border:1px solid var(--line);background:var(--field);color:var(--text);font:inherit;font-size:14px}
 .sheet-wrap{overflow-x:auto;max-width:100%;border:1px solid var(--line);border-radius:12px;background:var(--surface)}
-table.sheet{border-collapse:collapse;width:100%;min-width:980px;font-size:13.5px}
+table.sheet{border-collapse:collapse;width:100%;min-width:1040px;font-size:13.5px}
 .sheet th,.sheet td{padding:9px 10px;border-bottom:1px solid var(--line);text-align:left;vertical-align:top}
 .sheet th{position:sticky;top:0;background:var(--surface);cursor:pointer;white-space:nowrap;font-size:12.5px;
   color:var(--muted);user-select:none}
 .sheet th:hover{color:var(--text)}
 .sheet tr:last-child td{border-bottom:0}
 .sheet td.num{white-space:nowrap;font-variant-numeric:tabular-nums}
-.sheet td.sum{min-width:260px;max-width:420px;color:var(--muted)}
+.sheet td.title{min-width:190px;max-width:260px}
+.sheet td.pay{min-width:110px;max-width:160px}
+.sheet td.place{min-width:110px;max-width:160px}
+.sheet td.sum{min-width:240px;max-width:380px;color:var(--muted)}
 .sheet td.links{white-space:nowrap}
-.sheet td.links a{margin-right:8px}
+.sheet td.links a{display:block;margin-bottom:4px}
 </style>"""
 
 
@@ -826,8 +839,8 @@ def _sheet_html(rows: list[dict[str, str]], auto: int) -> str:
                  f'<a href="{esc(r["cover"], quote=True)}" target="_blank">Cover letter</a>' if r["cover"] else ""]
         body_rows.append(
             f'<tr><td class="num">{i}</td><td class="num">{esc(r["applied"])}</td><td>{esc(r["company"])}</td>'
-            f'<td><b>{esc(r["title"])}</b></td><td class="num">{esc(r["score"])}</td>'
-            f'<td class="num">{esc(r["salary"])}</td><td>{esc(r["location"])}</td>'
+            f'<td class="title"><b>{esc(r["title"])}</b></td><td class="num">{esc(r["score"])}</td>'
+            f'<td class="pay">{esc(r["salary"])}</td><td class="place">{esc(r["location"])}</td>'
             f'<td class="sum">{esc(r["summary"])}</td><td>{esc(r["how"])}</td>'
             f'<td class="links">{"".join(links)}</td></tr>')
     heads = ["#", "Applied", "Company", "Job title", "Score", "Salary", "Location", "What the job is", "How", "Links"]
