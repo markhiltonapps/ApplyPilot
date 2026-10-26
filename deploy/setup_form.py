@@ -130,19 +130,58 @@ OPENROUTER_URL = "https://openrouter.ai/api/v1"
 OPENROUTER_MODEL = "anthropic/claude-haiku-5.5"
 
 
+ANTHROPIC_URL = "https://api.anthropic.com/v1"
+ANTHROPIC_MODEL = "claude-haiku-5-5"
+ANTHROPIC_CONSOLE = "https://console.anthropic.com"
+
+
 def _write_env(data_dir: Path, env: dict[str, str]) -> None:
     (data_dir / ".env").write_text("".join(f"{k}={v}\n" for k, v in env.items()), encoding="utf-8")
 
 
 def current_provider(data_dir: Path) -> str:
-    return "openrouter" if _env_values(data_dir).get("LLM_URL", "").startswith(OPENROUTER_URL) else "gemini"
+    url = _env_values(data_dir).get("LLM_URL", "")
+    return "openrouter" if url.startswith(OPENROUTER_URL) else "anthropic" if url.startswith(ANTHROPIC_URL) else "gemini"
 
 
 def _provider_has_key(data_dir: Path, environ: dict, provider: str) -> bool:
     env = _env_values(data_dir)
-    if provider == "openrouter":
-        return bool(env.get("LLM_API_KEY"))
+    if provider in ("openrouter", "anthropic"):
+        return current_provider(data_dir) == provider and bool(env.get("LLM_API_KEY"))
     return bool(environ.get("GEMINI_API_KEY") or env.get("GEMINI_API_KEY"))
+
+
+def _anthropic_test(key: str, model: str, timeout: int = 30):
+    """A one-token request to Claude, to see whether the key works and the account has credit."""
+    import httpx
+    return httpx.post(f"{ANTHROPIC_URL}/chat/completions", headers={"Authorization": f"Bearer {key}"},
+                      timeout=timeout, json={"model": model, "max_tokens": 1,
+                                             "messages": [{"role": "user", "content": "Hi"}]})
+
+
+def _anthropic_problem(resp) -> str | None:
+    if resp.status_code in (401, 403):
+        return ("Anthropic rejected that Claude API key. Copy it again from console.anthropic.com "
+                "(Settings, then API keys).")
+    if resp.status_code >= 400 and resp.status_code not in (429, 500, 502, 503, 529):
+        try:
+            why = (resp.json().get("error") or {}).get("message") or resp.text
+        except ValueError:
+            why = resp.text
+        if "credit" in why.lower():
+            return ("Your Anthropic account is out of API credit. Add some at console.anthropic.com "
+                    "(Settings, then Billing).")
+        return f"Claude is refusing requests (HTTP {resp.status_code}): {why[:200]}"
+    return None
+
+
+def _check_anthropic_key(key: str) -> str | None:
+    """Return an error message if Anthropic rejects the key or the account has no credit."""
+    import httpx
+    try:
+        return _anthropic_problem(_anthropic_test(key, ANTHROPIC_MODEL, timeout=20))
+    except httpx.HTTPError:
+        return None
 
 
 def _check_openrouter_key(key: str) -> str | None:
@@ -179,7 +218,12 @@ def ai_problem(data_dir: Path) -> str | None:
     problem = None
     env = _env_values(data_dir)
     key = env.get("LLM_API_KEY", "")
-    if env.get("LLM_URL", "").startswith(OPENROUTER_URL) and key:
+    if env.get("LLM_URL", "").startswith(ANTHROPIC_URL) and key:
+        try:
+            problem = _anthropic_problem(_anthropic_test(key, env.get("LLM_MODEL") or ANTHROPIC_MODEL))
+        except httpx.HTTPError:
+            problem = None
+    elif env.get("LLM_URL", "").startswith(OPENROUTER_URL) and key:
         headers = {"Authorization": f"Bearer {key}"}
         try:
             r = httpx.get(f"{OPENROUTER_URL}/key", headers=headers, timeout=10)
@@ -339,13 +383,28 @@ def save(data_dir: Path, fields: dict[str, str], files: dict[str, tuple[str, byt
             errors.append(problem)
         elif key or _provider_has_key(data_dir, environ, "openrouter"):
             env = _env_values(data_dir)
-            env.update({"LLM_URL": OPENROUTER_URL, "LLM_MODEL": env.get("LLM_MODEL") or OPENROUTER_MODEL})
+            model = env.get("LLM_MODEL") if "/" in env.get("LLM_MODEL", "") else OPENROUTER_MODEL
+            env.update({"LLM_URL": OPENROUTER_URL, "LLM_MODEL": model})
             if key:
                 env["LLM_API_KEY"] = key
             _write_env(data_dir, env)
             _ai_check["at"] = 0.0  # check the new settings on the next page view
         else:
             errors.append("Add your OpenRouter API key.")
+    elif provider == "anthropic":
+        key = re.sub(r"\s", "", f.get("anthropic_key", ""))
+        problem = _check_anthropic_key(key) if key else None
+        if problem:
+            errors.append(problem)
+        elif key or _provider_has_key(data_dir, environ, "anthropic"):
+            env = _env_values(data_dir)
+            env.update({"LLM_URL": ANTHROPIC_URL, "LLM_MODEL": ANTHROPIC_MODEL})
+            if key:
+                env["LLM_API_KEY"] = key
+            _write_env(data_dir, env)
+            _ai_check["at"] = 0.0
+        else:
+            errors.append("Add your Claude API key.")
     else:
         key = re.sub(r"\s", "", f.get("gemini_key", ""))
         problem = _check_gemini_key(key) if key else None
@@ -381,8 +440,8 @@ def save(data_dir: Path, fields: dict[str, str], files: dict[str, tuple[str, byt
     if errors:
         return errors
 
-    stored = {k: v for k, v in f.items() if k not in ("gemini_key", "openrouter_key", "resume_text", "site_password",
-                                                 "clear_site_password")}
+    secret = ("gemini_key", "openrouter_key", "anthropic_key", "resume_text", "site_password", "clear_site_password")
+    stored = {k: v for k, v in f.items() if k not in secret}
     (data_dir / "setup_form.json").write_text(json.dumps(stored, indent=2), encoding="utf-8")
     write_config(data_dir, stored)
     return []
@@ -566,6 +625,13 @@ def render(data_dir: Path, environ: dict, values: dict[str, str] | None = None,
     provider = v.get("provider") or current_provider(data_dir)
     gem_saved = _provider_has_key(data_dir, environ, "gemini")
     or_saved = _provider_has_key(data_dir, environ, "openrouter")
+    an_saved = _provider_has_key(data_dir, environ, "anthropic")
+    an_hint = ("✅ Key saved. Leave blank to keep it." if an_saved else
+               f'1. Sign in at <a href="{ANTHROPIC_CONSOLE}" target="_blank">console.anthropic.com</a> (this is '
+               'separate from the Claude chat app; a Claude subscription doesn&rsquo;t include API use). '
+               '2. Open <b>Settings &rarr; Billing</b> and add $5&ndash;10 of credit. '
+               '3. Open <b>Settings &rarr; API keys</b>, click <b>Create key</b>, copy it (starts with sk-ant-) '
+               'and paste it here.')
     gem_hint = ("✅ Key saved. Leave blank to keep it." if gem_saved else
                 'Open <a href="https://aistudio.google.com/apikey" target="_blank">aistudio.google.com/apikey</a>, '
                 'sign in with Google, tap <b>Create API key</b>, copy it and paste it here.')
@@ -612,12 +678,18 @@ def render(data_dir: Path, environ: dict, values: dict[str, str] | None = None,
 <p class="hint" style="margin-top:0">ApplyPilot uses an AI service to score jobs and write your resumes.</p>
 <label class="choice"><input type="radio" name="provider" value="openrouter"{" checked" if provider == "openrouter" else ""}>
 <span><b>OpenRouter</b> &mdash; recommended. Pay as you go, about $1 or less per full search. Reliable.</span></label>
+<label class="choice"><input type="radio" name="provider" value="anthropic"{" checked" if provider == "anthropic" else ""}>
+<span><b>Claude (Anthropic)</b> &mdash; use your own Claude API key. Pay as you go, about the same as OpenRouter.</span></label>
 <label class="choice"><input type="radio" name="provider" value="gemini"{" checked" if provider == "gemini" else ""}>
 <span><b>Google Gemini</b> &mdash; free, but often busy and slow.</span></label>
 <div class="pk" data-for="openrouter">
 <label for="openrouter_key">OpenRouter API key</label>
 <input type="password" id="openrouter_key" name="openrouter_key" autocomplete="off" placeholder="{"••••••••" if or_saved else "sk-or-…"}">
 <p class="hint">{or_hint}</p></div>
+<div class="pk" data-for="anthropic">
+<label for="anthropic_key">Claude API key</label>
+<input type="password" id="anthropic_key" name="anthropic_key" autocomplete="off" placeholder="{"••••••••" if an_saved else "sk-ant-…"}">
+<p class="hint">{an_hint}</p></div>
 <div class="pk" data-for="gemini">
 <label for="gemini_key">Gemini API key</label>
 <input type="password" id="gemini_key" name="gemini_key" autocomplete="off" placeholder="{"••••••••" if gem_saved else "AIza…"}">

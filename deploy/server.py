@@ -483,10 +483,14 @@ def ai_banner() -> str:
     problem = setup_form.ai_problem(DATA_DIR)
     if not problem:
         return ""
+    fix = ('Fix it at <a href="https://console.anthropic.com" target="_blank" rel="noopener">console.anthropic.com</a> '
+           '(Settings &rarr; Billing for credit, or API keys),'
+           if setup_form.current_provider(DATA_DIR) == "anthropic" else
+           'Fix it at <a href="https://openrouter.ai/settings/credits" target="_blank" rel="noopener">openrouter.ai</a> '
+           '(Credits, or Keys for the spending limit),')
     return (f'<div class="card" style="border-color:#ef444466;background:#ef44441a;margin-bottom:16px">'
             f'<b style="color:#fca5a5">The AI service isn&rsquo;t working.</b> {html.escape(problem)} Until it&rsquo;s fixed, '
-            'no jobs are scored and no resumes are written. Fix it at <a href="https://openrouter.ai/settings/credits" '
-            'target="_blank" rel="noopener">openrouter.ai</a> (Credits, or Keys for the spending limit), then open '
+            f'no jobs are scored and no resumes are written. {fix} then open '
             '<a href="/setup">Setup</a> and click <b>Save</b> to restart.</div>')
 
 
