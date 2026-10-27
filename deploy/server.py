@@ -229,6 +229,20 @@ def requeue_failed_scores() -> None:
     try:
         conn = sqlite3.connect(db, timeout=10)
         drop_employers(conn)
+        # Jobs from career sites no longer in the employer list that were never scored aren't worth paying
+        # to score: take them out of the queue. Scored, tailored and applied jobs stay.
+        try:
+            from applypilot.discovery.workday import load_employers
+            current = [e["name"] for e in load_employers().values()]
+        except Exception:  # noqa: BLE001 - leave the queue alone if the list can't be read
+            current = []
+        if current:
+            gone = conn.execute(
+                "DELETE FROM jobs WHERE strategy = 'workday_api' AND COALESCE(fit_score, 0) = 0 "
+                "AND applied_at IS NULL AND tailored_resume_path IS NULL "
+                f"AND site NOT IN ({', '.join('?' for _ in current)})", current).rowcount
+            if gone:
+                log(f"Dropped {gone} unscored job(s) from employers no longer searched")
         n = conn.execute("UPDATE jobs SET fit_score = NULL, scored_at = NULL WHERE fit_score = 0").rowcount
         # Scoring instructions changed since these were scored: score again (keeps jobs that
         # already have a tailored resume).
