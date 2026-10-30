@@ -79,14 +79,21 @@ def _build_profile_summary(profile: dict) -> str:
     # Availability
     lines.append(f"Available: {avail.get('earliest_start_date', 'Immediately')}")
 
-    # Standard responses
+    # Standard responses (the Setup page's application answers override the defaults)
+    answers = p.get("application_answers", {})
     lines.extend([
         "Age 18+: Yes",
         "Background Check: Yes",
         "Felony: No",
-        "Previously Worked Here: No",
+        f"Previously Worked Here: {answers.get('worked_before') or 'No'}",
         "How Heard: Online Job Board",
     ])
+    if answers.get("field_of_study"):
+        lines.append(f"Field of Study: {answers['field_of_study']}")
+    if answers.get("grad_year"):
+        lines.append(f"Graduation Year: {answers['grad_year']}")
+    if answers.get("edu_start_year"):
+        lines.append(f"Degree Start Year: {answers['edu_start_year']}")
 
     # EEO
     lines.append(f"Gender: {eeo.get('gender', 'Decline to self-identify')}")
@@ -176,10 +183,12 @@ def _build_screening_section(profile: dict) -> str:
     years = exp.get("years_of_experience_total", "multiple")
     target_role = exp.get("target_role", personal.get("current_job_title", "software engineer"))
     work_auth = profile["work_authorization"]
+    relocate = (profile.get("application_answers") or {}).get("relocate", "No")
+    relocation = "willing to relocate" if relocate.lower().startswith("y") else "cannot relocate"
 
     return f"""== SCREENING QUESTIONS (be strategic) ==
 Hard facts -> answer truthfully from the profile. No guessing. This includes:
-  - Location/relocation: lives in {city}, cannot relocate
+  - Location/relocation: lives in {city}, {relocation}
   - Work authorization: {work_auth.get('legally_authorized_to_work', 'see profile')}
   - Citizenship, clearance, licenses, certifications: answer from profile only
   - Criminal/background: answer from profile only
@@ -197,8 +206,35 @@ placeholder or a decline, select it again (type the option text and press Enter 
 Answer the disability question too when the form has one (it may be its own section at the bottom).
 
 Education sections -> fill them from the profile's Education and School lines even when optional: school name
-(search the school dropdown for it; pick the closest match), degree (e.g. Bachelor's), and field of study. Leave
-graduation dates and GPA blank unless the form requires them -- never invent them."""
+(search the school dropdown for it; pick the closest match), degree (e.g. Bachelor's), and field of study. Use the
+profile's Graduation Year / Degree Start Year when the form asks for dates (any month is fine if it needs one);
+leave dates and GPA blank when the profile has none unless the form requires them -- never invent them.
+{_build_answers_section(profile)}"""
+
+
+_ANSWER_LABELS = (
+    ("worked_before", "Worked for this company before"),
+    ("relatives", "Relatives or family at this company"),
+    ("terminated", "Ever fired, terminated, or asked to resign"),
+    ("government_employment", "Current or former government employee"),
+    ("clearance", "Security clearance"),
+    ("drivers_license", "Valid driver's license"),
+    ("travel", "Willing to travel"),
+    ("relocate", "Willing to relocate"),
+    ("non_compete", "Under a non-compete or similar agreement"),
+)
+
+
+def _build_answers_section(profile: dict) -> str:
+    """The person's answers to other common application questions (from the Setup page), or ''."""
+    answers = profile.get("application_answers") or {}
+    lines = [f"  - {label}: {answers[key]}" for key, label in _ANSWER_LABELS if answers.get(key)]
+    other = [ln.strip() for ln in (answers.get("other") or "").splitlines() if ln.strip()]
+    lines.extend(f"  - {ln}" for ln in other)
+    if not lines:
+        return ""
+    return ("\n\nOther common questions -> answer with these (the applicant filled them in; use the closest form "
+            "option and never contradict them):\n" + "\n".join(lines))
 
 
 def _build_hard_rules(profile: dict) -> str:

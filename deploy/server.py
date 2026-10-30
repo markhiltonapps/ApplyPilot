@@ -941,6 +941,25 @@ def needs_you(j) -> bool:
     return status == "manual" or reason in HAND_ONLY_REASONS or not worth_retrying(reason, j["apply_attempts"])
 
 
+def _ready_lists(jobs):
+    """The lists behind Ready to apply: applied, their duplicate keys, to do, hidden, closed, and needs you."""
+    done = sorted((j for j in jobs if j["applied_at"]), key=lambda j: j["applied_at"], reverse=True)
+    applied_keys = {_dup_key(j) for j in done}
+    # The same posting found on two boards is listed once (jobs come best match first, so the best copy stays).
+    todo, seen = [], set()
+    hidden = [j for j in jobs if not j["applied_at"] and (j["apply_status"] or "") == "skipped"]
+    closed = [j for j in jobs if (j["apply_status"] or "") != "skipped" and gone(j)]
+    seen.update(_dup_key(j) for j in closed)  # the same posting listed on another board is closed too
+    floor = _min_salary()
+    for j in jobs:
+        if (not j["applied_at"] and (j["apply_status"] or "") != "skipped" and _dup_key(j) not in seen
+                and not gone(j) and not pays_below(j["salary"], floor)):
+            seen.add(_dup_key(j))
+            todo.append(j)
+    mine = [j for j in todo if needs_you(j) and _dup_key(j) not in applied_keys]
+    return done, applied_keys, todo, hidden, closed, mine
+
+
 def ready_html(view: str = "") -> bytes:
     jobs = _tailored_jobs()
     if not jobs:
@@ -953,21 +972,9 @@ def ready_html(view: str = "") -> bytes:
 <p class="muted">{note}</p><a class="btn ghost" href="/status">Check progress</a></div>"""
         return page("Ready to apply", body, "ready")
 
-    done = sorted((j for j in jobs if j["applied_at"]), key=lambda j: j["applied_at"], reverse=True)
-    applied_keys = {_dup_key(j) for j in done}
-    # The same posting found on two boards is listed once (jobs come best match first, so the best copy stays).
-    todo, seen = [], set()
-    hidden = [j for j in jobs if not j["applied_at"] and (j["apply_status"] or "") == "skipped"]
-    closed = [j for j in jobs if (j["apply_status"] or "") != "skipped" and gone(j)]
-    seen.update(_dup_key(j) for j in closed)  # the same posting listed on another board is closed too
+    done, applied_keys, todo, hidden, closed, mine = _ready_lists(jobs)
     floor = _min_salary()
     low_pay = [j for j in jobs if not j["applied_at"] and pays_below(j["salary"], floor)]
-    for j in jobs:
-        if (not j["applied_at"] and (j["apply_status"] or "") != "skipped" and _dup_key(j) not in seen
-                and not gone(j) and not pays_below(j["salary"], floor)):
-            seen.add(_dup_key(j))
-            todo.append(j)
-    mine = [j for j in todo if needs_you(j) and _dup_key(j) not in applied_keys]
     tabs = ai_banner()
     tabs += (f'<div class="tabs"><a href="/ready"{" class=on" if view not in ("needs", "hidden") else ""}>All to apply '
             f'<span>{len(todo)}</span></a><a href="/ready?view=needs"{" class=on" if view == "needs" else ""}>'
@@ -987,10 +994,18 @@ these. Click <b>Bring it back</b> to put one back on the list.</p><div class="st
         cards = "".join(_job_card(j, applied_keys) for j in mine) or (
             '<div class="card empty"><div class="big">✅</div><h2>Nothing waiting on you</h2>'
             '<p class="muted">Jobs auto-apply can&rsquo;t finish (an account, a CAPTCHA) show up here.</p></div>')
+        again = sum(1 for j in mine if retryable(j))
+        retry_html = (f"""<form method="post" action="/retry" class="retry"><p class="sub">Added what was missing in
+<a href="/setup">Setup</a> (a job site password, a CapSolver key, answers to the questions forms ask)? Put these
+back in auto-apply&rsquo;s queue and the next run tries them again.</p>
+<button type="submit" class="btn primary">Try again on {again} job{"s" if again != 1 else ""}</button></form>"""
+                      if again else "")
+        if view_note := _retry_note():
+            retry_html = f'<div class="ok">{view_note}</div>' + retry_html
         body = f"""<h1>Ready to apply</h1>{tabs}
 <p class="sub">{len(mine)} job{"s" if len(mine) != 1 else ""} auto-apply couldn&rsquo;t finish, best match first. The
 resume and cover letter are already written: click <b>Apply</b>, fill in the form (use <b>Resume</b> and
-<b>Cover letter</b> to download them), then tick <b>I applied</b>.</p>
+<b>Cover letter</b> to download them), then tick <b>I applied</b>.</p>{retry_html}
 <div class="stack">{cards}</div>"""
         return page("Needs you", body, "ready", READY_CSS)
     todo_html = "".join(_job_card(j, applied_keys) for j in todo) or (
@@ -1026,6 +1041,9 @@ READY_CSS = """<style>
 .tabs a span{display:inline-block;min-width:22px;padding:1px 7px;margin-left:5px;border-radius:999px;font-size:12.5px;
   background:var(--surface-2);color:var(--muted);text-align:center}
 .tabs a.on span{background:var(--accent);color:var(--accent-ink)}
+form.retry{margin:0 0 18px;padding:12px 14px;border:1px solid var(--line);border-radius:12px;background:var(--surface)}
+form.retry .sub{margin:0 0 10px}
+form.retry .btn{font:inherit;font-weight:650;cursor:pointer}
 </style>"""
 
 APP_ROOT = Path(__file__).resolve().parent.parent  # the ApplyPilot source the server runs
@@ -1116,6 +1134,59 @@ def retry_account_jobs() -> int:
         return 0
 
 
+# Reasons under Needs you that another auto-apply run can't change: a sign-in through Google/Microsoft, or a code
+# the site emails you. Everything else there is worth another try once Setup has what was missing.
+NO_RETRY_REASONS = ("sso_required", "email_verification")
+
+
+def retryable(j) -> bool:
+    """Whether a job under Needs you goes back in auto-apply's queue when you press Try again."""
+    if needs_account(j["application_url"] or j["url"]):
+        return False  # pointless without a job site password; saving one re-queues these on its own
+    if (j["apply_status"] or "") == "manual":
+        return False  # a site auto-apply never attempts (it would be set aside again at once)
+    reason = (j["apply_error"] or j["apply_status"] or "").lower()
+    return not any(reason.startswith(r) for r in NO_RETRY_REASONS)
+
+
+_retry_done: dict = {"n": 0, "at": 0.0}
+
+
+def _retry_note() -> str:
+    """A one-time note after Try again, shown on the next view of Needs you."""
+    if not _retry_done["at"] or time.time() - _retry_done["at"] > 120:
+        return ""
+    n = _retry_done["n"]
+    _retry_done["at"] = 0.0
+    if not n:
+        return "Nothing to try again right now."
+    return (f"<b>{n} job{'s' if n != 1 else ''}</b> put back in the queue. Start an "
+            f'<a href="/autoapply">auto-apply run</a> to try them again.')
+
+
+def retry_needs_you() -> int:
+    """Put every job under Needs you that's worth another try back in auto-apply's queue, with a fresh attempt
+    count. Returns how many."""
+    import sqlite3
+    urls = [j["url"] for j in _ready_lists(_tailored_jobs())[5] if retryable(j)]
+    if not urls:
+        return 0
+    try:
+        conn = sqlite3.connect(DATA_DIR / "applypilot.db", timeout=10)
+        n = 0
+        for i in range(0, len(urls), 500):
+            chunk = urls[i:i + 500]
+            n += conn.execute(
+                "UPDATE jobs SET apply_status = NULL, apply_error = NULL, apply_attempts = 0 "
+                f"WHERE applied_at IS NULL AND url IN ({', '.join('?' * len(chunk))})", chunk).rowcount
+        conn.commit()
+        conn.close()
+        return n
+    except sqlite3.Error as e:
+        log(f"Could not re-queue the jobs under Needs you: {e}")
+        return 0
+
+
 def _min_salary() -> int:
     try:
         from applypilot.scoring.scorer import min_salary
@@ -1190,6 +1261,10 @@ def apply_bundle() -> bytes:
         z.write(DATA_DIR / "profile.json", "profile.json")
         if (DATA_DIR / "resume.txt").exists():
             z.write(DATA_DIR / "resume.txt", "resume.txt")
+        # Only the CapSolver key goes to the PC (the AI service key stays here). Always written, so removing the
+        # key in Setup removes it there too.
+        cap = setup_form.capsolver_key(DATA_DIR)
+        z.writestr(".env", f"CAPSOLVER_API_KEY={cap}\n" if cap else "")
         for r in rows:
             job = {k: r[k] for k in ("url", "title", "site", "location", "application_url", "fit_score",
                                      "full_description", "apply_attempts")}
@@ -1660,7 +1735,7 @@ class Handler(BaseHTTPRequestHandler):
 
     def do_POST(self):
         path = urlparse(self.path).path
-        if path not in ("/run", "/setup", "/edit", "/mark", "/api/results", "/api/log", "/autoapply/start",
+        if path not in ("/run", "/setup", "/edit", "/mark", "/retry", "/api/results", "/api/log", "/autoapply/start",
                         "/autoapply/stop", "/api/agent/poll", "/api/agent/status", "/api/agent/done",
                         "/onboard/start", "/onboard/answers", "/onboard/finish", "/onboard/restart",
                         "/onboard/retry"):
@@ -1697,6 +1772,11 @@ class Handler(BaseHTTPRequestHandler):
             log(f"Companion reported {len(results)} result(s), {n} recorded")
             _summaries_due.set()
             return self._send(200, json.dumps({"updated": n}).encode(), "application/json")
+        if path == "/retry":
+            n = retry_needs_you()
+            _retry_done["n"], _retry_done["at"] = n, time.time()
+            log(f"Try again pressed: {n} job(s) under Needs you are queued for the next auto-apply run")
+            return self._send(303, b"", "text/plain", {"Location": "/ready?view=needs"})
         if path == "/mark":
             length = int(self.headers.get("Content-Length") or 0)
             form = parse_qs(self.rfile.read(min(length, 65536)).decode("utf-8", errors="replace"))

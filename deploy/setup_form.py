@@ -283,6 +283,11 @@ def _saved_form(data_dir: Path) -> dict[str, str]:
     return {}
 
 
+def capsolver_key(data_dir: Path) -> str:
+    """The CapSolver API key saved in Setup, or '' (auto-apply uses it to get past CAPTCHAs)."""
+    return _env_values(data_dir).get("CAPSOLVER_API_KEY", "")
+
+
 SITE_PASSWORD_FILE = ".site_password"
 
 
@@ -428,6 +433,15 @@ def save(data_dir: Path, fields: dict[str, str], files: dict[str, tuple[str, byt
         else:
             _save_site_password(data_dir, password)
 
+    # CapSolver key (optional, for sites that show a CAPTCHA). Kept like the other keys.
+    cap_key = re.sub(r"\s", "", f.get("capsolver_key", ""))
+    if f.get("clear_capsolver_key") or cap_key:
+        env = _env_values(data_dir)
+        env.pop("CAPSOLVER_API_KEY", None)
+        if cap_key and not f.get("clear_capsolver_key"):
+            env["CAPSOLVER_API_KEY"] = cap_key
+        _write_env(data_dir, env)
+
     for name, label in (("full_name", "Full name"), ("email", "Email"), ("city", "City"),
                         ("country", "Country"), ("titles", "Job titles")):
         if not f.get(name):
@@ -440,7 +454,8 @@ def save(data_dir: Path, fields: dict[str, str], files: dict[str, tuple[str, byt
     if errors:
         return errors
 
-    secret = ("gemini_key", "openrouter_key", "anthropic_key", "resume_text", "site_password", "clear_site_password")
+    secret = ("gemini_key", "openrouter_key", "anthropic_key", "resume_text", "site_password", "clear_site_password",
+              "capsolver_key", "clear_capsolver_key")
     stored = {k: v for k, v in f.items() if k not in secret}
     (data_dir / "setup_form.json").write_text(json.dumps(stored, indent=2), encoding="utf-8")
     write_config(data_dir, stored)
@@ -464,6 +479,34 @@ def rebuild_from_saved(data_dir: Path) -> bool:
         return False
     write_config(data_dir, f)
     return True
+
+
+# Questions application forms often ask that aren't on a resume. Each is (form field, question, choices);
+# a choice list of None means a free-text box. The first choice is the default.
+ANSWER_FIELDS: list[tuple[str, str, list[str] | None]] = [
+    ("field_of_study", "Field of study (major)", None),
+    ("grad_year", "Graduation year", None),
+    ("edu_start_year", "Year you started that degree", None),
+    ("worked_before", "Have you worked for the company before? (applies to every application)", ["No", "Yes"]),
+    ("relatives", "Do you have relatives at the company?", ["No", "Yes"]),
+    ("terminated", "Ever been fired or asked to resign?", ["No", "Yes"]),
+    ("government_employment", "Current or former government employee?", ["No", "Yes"]),
+    ("clearance", "Security clearance", ["None", "Confidential", "Secret", "Top Secret", "Top Secret / SCI"]),
+    ("drivers_license", "Valid driver's license?", ["Yes", "No"]),
+    ("travel", "Willing to travel?", ["Yes, as needed", "Up to 25%", "Up to 50%", "No"]),
+    ("relocate", "Willing to relocate?", ["No", "Yes"]),
+    ("non_compete", "Under a non-compete or similar agreement?", ["No", "Yes"]),
+]
+
+
+def application_answers(f: dict[str, str]) -> dict[str, str]:
+    """The answers to common application questions saved in Setup, with defaults where nothing was chosen."""
+    answers = {}
+    for name, _label, choices in ANSWER_FIELDS:
+        value = f.get(name, "").strip()
+        answers[name] = value if value or choices is None else choices[0]
+    answers["other"] = f.get("extra_answers", "").strip()
+    return answers
 
 
 def write_config(data_dir: Path, f: dict[str, str]) -> None:
@@ -521,6 +564,7 @@ def write_config(data_dir: Path, f: dict[str, str]) -> None:
             "real_metrics": _lines(f.get("metrics", "")),
         },
         "preferences": {"ai_only": bool(f.get("ai_only"))},
+        "application_answers": application_answers(f),
         "eeo_voluntary": {
             "gender": f.get("eeo_gender") or DECLINE,
             "race_ethnicity": f.get("eeo_race") or DECLINE,
@@ -647,13 +691,25 @@ def render(data_dir: Path, environ: dict, values: dict[str, str] | None = None,
                "password here, auto-apply signs in with your email and this password, or creates the account if "
                "there isn't one. Without it, those jobs are left for you to do by hand.")
     pw_clear = (check("clear_site_password", "Remove the saved password", False) if pw_saved else "")
+    cap_saved = bool(capsolver_key(data_dir))
+    cap_hint = ("✅ Key saved. Leave blank to keep it." if cap_saved else
+                "Optional. Some job sites show a CAPTCHA (&ldquo;prove you&rsquo;re human&rdquo; puzzle) that stops "
+                "auto-apply. CapSolver is a paid service (a few cents per puzzle) that solves them. "
+                '1. Sign up at <a href="https://www.capsolver.com" target="_blank">capsolver.com</a>. '
+                "2. Add $5&ndash;10 of credit. 3. Copy the API key from the dashboard and paste it here.")
+    cap_clear = (check("clear_capsolver_key", "Remove the saved CapSolver key", False) if cap_saved else "")
+    answer_fields = "".join(
+        select(name, label, [(o, o) for o in choices], choices[0]) if choices else text(name, label)
+        for name, label, choices in ANSWER_FIELDS)
 
     top = ""
     if errors:
         kept = [name for name, ok in (("resume", (data_dir / "resume.txt").exists()),
                                       ("API key", has_llm_key(data_dir, environ)),
-                                      ("job site password", site_password(data_dir))) if ok]
-        kept_note = (f"<p>Your {' and '.join(kept)} {'are' if len(kept) > 1 else 'is'} saved, "
+                                      ("job site password", site_password(data_dir)),
+                                      ("CapSolver key", capsolver_key(data_dir))) if ok]
+        kept_list = kept[0] if len(kept) == 1 else ", ".join(kept[:-1]) + " and " + kept[-1]
+        kept_note = (f"<p>Your {kept_list} {'are' if len(kept) > 1 else 'is'} saved, "
                      "so you don't need to add them again.</p>") if kept else ""
         top = '<div class="errors"><b>Almost there. Please fix:</b><ul>' + "".join(
             f"<li>{html.escape(e)}</li>" for e in errors) + "</ul>" + kept_note + "</div>"
@@ -757,6 +813,21 @@ site&rsquo;s rules.</p>{pw_clear}
 answers them with what you choose here; "{DECLINE}" means it picks the decline option.</p>
 {"".join(select(name, label, [(o, o) for o in opts] + [(DECLINE, DECLINE)], DECLINE)
          for name, (label, opts) in EEO_OPTIONS.items())}
+</fieldset>
+
+<fieldset><legend>7. Application answers</legend>
+<p class="hint" style="margin-top:0">Application forms often ask these, and auto-apply can&rsquo;t finish a form it
+can&rsquo;t answer. Fill in what applies; leave the rest.</p>
+{answer_fields}
+{area("extra_answers", "Anything else forms ask you",
+       "One per line, as question: answer. Auto-apply uses these when a form asks something not covered above.",
+       placeholder="Preferred pronouns: he/him\nCountry of residence: United States\nHow did you hear about us: LinkedIn")}
+</fieldset>
+
+<fieldset><legend>8. CAPTCHA solving</legend>
+<label for="capsolver_key">CapSolver API key</label>
+<input type="password" id="capsolver_key" name="capsolver_key" autocomplete="off" placeholder="{"••••••••" if cap_saved else "CAP-…"}">
+<p class="hint">{cap_hint}</p>{cap_clear}
 </fieldset>
 
 <button type="submit">Save and start searching</button>
