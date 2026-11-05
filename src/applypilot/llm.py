@@ -9,13 +9,45 @@ Auto-detects provider from environment:
 LLM_MODEL env var overrides the model name for any provider.
 """
 
+import json
 import logging
 import os
 import time
+from pathlib import Path
 
 import httpx
 
 log = logging.getLogger(__name__)
+
+# What the AI service is really doing, written to <data dir>/ai_status.json so the dashboard can warn when
+# real requests are being refused (out of credit, spending limit, bad key), even if a tiny test request passes.
+_STATUS_FILE = "ai_status.json"
+_last_ok_write = 0.0
+
+
+def _record_status(ok: bool, code: int = 0, message: str = "") -> None:
+    """Note that an AI request worked or was refused. Never raises: this is bookkeeping only."""
+    global _last_ok_write
+    try:
+        now = time.time()
+        if ok and now - _last_ok_write < 30:
+            return  # successes are frequent; one note every half minute is plenty
+        path = Path(os.environ.get("APPLYPILOT_DIR") or (Path.home() / ".applypilot")) / _STATUS_FILE
+        try:
+            state = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            state = {}
+        if ok:
+            _last_ok_write = now
+            state.update(last_ok=now, fails_since_ok=0)
+        else:
+            state.update(last_fail=now, fail_code=code, fail_message=message[:300],
+                         fails_since_ok=int(state.get("fails_since_ok", 0)) + 1)
+        tmp = path.with_suffix(".tmp")
+        tmp.write_text(json.dumps(state), encoding="utf-8")
+        tmp.replace(path)
+    except Exception:  # noqa: BLE001 - never let bookkeeping break a real request
+        pass
 
 # ---------------------------------------------------------------------------
 # Provider detection
@@ -153,7 +185,10 @@ class LLMClient:
             headers={"Content-Type": "application/json"},
             params={"key": self.api_key},
         )
+        if resp.status_code >= 400 and resp.status_code not in (429, 503):
+            _record_status(False, resp.status_code, resp.text)
         resp.raise_for_status()
+        _record_status(True)
         data = resp.json()
         parts = (data.get("candidates") or [{}])[0].get("content", {}).get("parts") or []
         text = "".join(p.get("text", "") for p in parts if not p.get("thought"))
@@ -208,7 +243,9 @@ class LLMClient:
         if resp.status_code >= 400 and resp.status_code not in (429, 503):
             # The status alone ("403 Forbidden") doesn't say why; the provider's message does.
             log.error("LLM request refused (HTTP %s): %s", resp.status_code, resp.text[:300])
+            _record_status(False, resp.status_code, resp.text)
         resp.raise_for_status()
+        _record_status(True)
         data = resp.json()
         choice = data["choices"][0]
         content = choice["message"].get("content") or ""

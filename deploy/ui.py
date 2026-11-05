@@ -133,8 +133,8 @@ def shell(title: str, body: str, active: str = "", extra_css: str = "", head: st
 <body>{topbar(active)}<main class="wrap">{body}</main></body></html>""".encode()
 
 
-def dashboard_with_topbar(dashboard_html: str) -> str:
+def dashboard_with_topbar(dashboard_html: str, alert: str = "") -> str:
     """Add the site header to the generated dashboard, which has its own 2rem body padding."""
     bar = topbar("jobs").replace('class="ap-topbar"', 'class="ap-topbar ap-dash"', 1)
     return dashboard_html.replace("</head>", f"<style>{TOPBAR_CSS}</style></head>", 1).replace(
-        "<body>", "<body>" + bar, 1)
+        "<body>", "<body>" + bar + (f'<div style="margin:16px 2rem 0;max-width:900px">{alert}</div>' if alert else ""), 1)

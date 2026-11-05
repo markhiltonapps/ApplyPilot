@@ -434,6 +434,8 @@ def scheduler() -> None:
 # ---------------------------------------------------------------------------
 
 def page(title: str, body: str, active: str = "", head: str = "") -> bytes:
+    if active != "setup" and AI_ALERT_MARK not in body:
+        body = ai_failure_alert() + body
     return ui.shell(title, body, active, extra_css=setup_form.FORM_CSS + editor.EDITOR_CSS, head=head)
 
 
@@ -492,8 +494,85 @@ def _until(iso: str | None) -> str:
     return f"in about {mins // 60} h {mins % 60} min" if mins >= 60 else f"in about {max(mins, 1)} min"
 
 
+AI_ALERT_MARK = "data-ai-alert"
+
+
+def ai_failure() -> dict | None:
+    """The AI service is refusing real requests right now, according to what the scorer and writers just saw.
+
+    This is more trustworthy than the test request in setup_form.ai_problem(), which can pass while real
+    requests fail (for example a payment error when credit is nearly gone).
+    """
+    try:
+        st = json.loads((DATA_DIR / "ai_status.json").read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return None
+    last_fail, last_ok = float(st.get("last_fail") or 0), float(st.get("last_ok") or 0)
+    if (int(st.get("fails_since_ok") or 0) < 2 or last_fail <= last_ok
+            or time.time() - last_fail > 3 * 3600):
+        return None  # a blip, already recovered, or too old to trust
+    return st
+
+
+def _unscored_count() -> int:
+    import sqlite3
+    db = DATA_DIR / "applypilot.db"
+    if not db.exists():
+        return 0
+    try:
+        conn = sqlite3.connect(f"file:{db}?mode=ro", uri=True, timeout=5)
+        n = conn.execute("SELECT COUNT(*) FROM jobs WHERE fit_score = 0 AND applied_at IS NULL").fetchone()[0]
+        conn.close()
+        return int(n)
+    except sqlite3.Error:
+        return 0
+
+
+def _failure_reason(st: dict) -> str:
+    code, msg = int(st.get("fail_code") or 0), str(st.get("fail_message") or "")
+    low = msg.lower()
+    if code == 402 or "payment" in low or ("credit" in low and "insufficient" in low):
+        return ("The AI account says it doesn&rsquo;t have enough credit for these requests. Add credit, even if "
+                "some balance shows.")
+    if code == 403 and "limit" in low:
+        return "The API key has reached its spending limit. Raise or remove the limit on that key."
+    if code in (401, 403):
+        return "The AI service is rejecting the API key. It may have been deleted, disabled or mistyped."
+    if code == 404:
+        return "The AI service doesn&rsquo;t recognize the model name. Check the model in Setup."
+    return f"The AI service refused the request (HTTP {code}). {html.escape(msg[:160])}"
+
+
+def ai_failure_alert() -> str:
+    """A red box saying scoring and writing are failing, why, and how to restart. Empty when all is well."""
+    st = ai_failure()
+    if not st:
+        return ""
+    provider = setup_form.current_provider(DATA_DIR)
+    if provider == "anthropic":
+        where = ('<a href="https://console.anthropic.com" target="_blank" rel="noopener">console.anthropic.com</a> '
+                 '(Settings, then Billing or API keys)')
+    elif provider == "gemini":
+        where = ('<a href="https://aistudio.google.com/apikey" target="_blank" rel="noopener">aistudio.google.com</a> '
+                 '(API keys)')
+    else:
+        where = ('<a href="https://openrouter.ai/settings/credits" target="_blank" rel="noopener">openrouter.ai</a> '
+                 '(Credits, or Keys for the spending limit)')
+    n = _unscored_count()
+    waiting = (f" <b>{n:,} job{'s' if n != 1 else ''}</b> couldn&rsquo;t be scored. They show a score of 0, which "
+               "does not mean they are poor matches." if n else "")
+    return (f'<div class="card" {AI_ALERT_MARK} style="border-color:#ef444466;background:#ef44441a;margin-bottom:16px">'
+            '<b style="color:#fca5a5">Scoring has stopped: the AI service is refusing requests.</b> '
+            f'{_failure_reason(st)}{waiting} No new jobs are being scored or written until this is fixed. '
+            f'Fix it at {where}, then open <a href="/setup">Setup</a> and click <b>Save</b>. That puts the unscored '
+            'jobs back in line and restarts the search.</div>')
+
+
 def ai_banner() -> str:
     """A warning when the AI service is refusing requests: nothing gets scored or written until it's fixed."""
+    observed = ai_failure_alert()
+    if observed:
+        return observed
     problem = setup_form.ai_problem(DATA_DIR)
     if not problem:
         return ""
@@ -502,7 +581,7 @@ def ai_banner() -> str:
            if setup_form.current_provider(DATA_DIR) == "anthropic" else
            'Fix it at <a href="https://openrouter.ai/settings/credits" target="_blank" rel="noopener">openrouter.ai</a> '
            '(Credits, or Keys for the spending limit),')
-    return (f'<div class="card" style="border-color:#ef444466;background:#ef44441a;margin-bottom:16px">'
+    return (f'<div class="card" {AI_ALERT_MARK} style="border-color:#ef444466;background:#ef44441a;margin-bottom:16px">'
             f'<b style="color:#fca5a5">The AI service isn&rsquo;t working.</b> {html.escape(problem)} Until it&rsquo;s fixed, '
             f'no jobs are scored and no resumes are written. {fix} then open '
             '<a href="/setup">Setup</a> and click <b>Save</b> to restart.</div>')
@@ -1698,7 +1777,8 @@ class Handler(BaseHTTPRequestHandler):
                 except Exception as e:  # noqa: BLE001 - fall back to the last generated dashboard
                     log(f"Dashboard refresh failed: {e}")
             if dash.exists():
-                return self._send(200, ui.dashboard_with_topbar(dash.read_text(encoding="utf-8")).encode())
+                return self._send(200, ui.dashboard_with_topbar(dash.read_text(encoding="utf-8"),
+                                                                ai_failure_alert()).encode())
             return self._send(200, status_html())
         if path == "/status":
             return self._send(200, status_html())
@@ -1926,6 +2006,7 @@ class Handler(BaseHTTPRequestHandler):
             return self._send(200, page("ApplyPilot setup",
                                         setup_form.render(DATA_DIR, os.environ, fields, errors), "setup"))
         log("Setup saved from the web form")
+        (DATA_DIR / "ai_status.json").unlink(missing_ok=True)
         with _state_lock:
             state["config_problems"] = seed_config()
         restart_pipeline()
