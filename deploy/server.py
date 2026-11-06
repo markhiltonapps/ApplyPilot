@@ -1166,6 +1166,7 @@ FAILURE_WORDS = {
     "not_eligible_work_auth": "the role's work authorization doesn't fit",
     "not_eligible_salary": "the salary range doesn't fit",
     "email_verification": "the site emails you a code to finish",
+    "no_result_line": "Claude Code ended without giving a result",
 }
 
 
@@ -1963,7 +1964,10 @@ class Handler(BaseHTTPRequestHandler):
             record_results(results if mode == "real" else [r for r in results if r.get("status") != "applied"])
             summary, ok = run_summary(mode, results, bool(data.get("stopped")))
             if data.get("error"):
-                summary, ok = str(data["error"])[:300], False
+                # Why the run stopped comes first; keep the counts after it when some jobs were tried.
+                why_stopped = str(data["error"]).strip()
+                summary = f"{why_stopped} {summary}" if results else why_stopped
+                summary, ok = summary[:700], False
             control.finish(str(data.get("id", "")), summary, ok)
             log(f"Auto-apply finished: {summary}")
             reply = {"ok": True, "summary": summary}

@@ -300,6 +300,50 @@ def reset_failed() -> int:
 
 
 # ---------------------------------------------------------------------------
+# When Claude Code itself is the problem (not the job)
+# ---------------------------------------------------------------------------
+
+# Written for the person, not a programmer. The companion reads this file after a run and shows it on the website.
+CLAUDE_PROBLEM_FILE = "claude_problem.txt"
+
+_CLAUDE_PROBLEMS: list[tuple[str, re.Pattern, str]] = [
+    ("claude_billing", re.compile(r"credit balance|billing|payment required|insufficient (?:funds|credit)", re.I),
+     "Claude Code says there is a billing or credit problem on your Claude account. Fix that at claude.ai or "
+     "console.anthropic.com, then start the run again."),
+    ("claude_limit", re.compile(r"usage limit|limit reached|hit your limit|reached your .{0,30}limit|"
+                                r"weekly limit|5-hour limit|rate.?limit", re.I),
+     "Claude Code says you've reached a usage limit on your Claude plan. Wait for it to reset (Claude usually "
+     "says when), then start the run again."),
+    ("claude_signed_out", re.compile(r"/login|not logged in|please (?:log|sign) ?in|invalid api key|"
+                                     r"oauth token|authentication[_ ]error|unauthori[sz]ed|\b401\b", re.I),
+     "Claude Code on your PC is signed out. On that PC, open Claude Code and sign in again, then start the run."),
+    ("claude_busy", re.compile(r"overloaded|service unavailable|internal server error|\b529\b|\b503\b", re.I),
+     "Claude's service is busy or down right now. Try again in a little while."),
+]
+
+_SHORT_OUTPUT = 1500  # a real application session writes far more than this; a failure at the door doesn't
+_last_no_result_sample = ""
+
+
+def diagnose_claude_output(output: str) -> tuple[str, str] | None:
+    """If a session ended at once with a message that names a Claude Code problem, return (code, plain message)."""
+    if len(output) > _SHORT_OUTPUT:
+        return None
+    for code, pattern, message in _CLAUDE_PROBLEMS:
+        if pattern.search(output):
+            return code, message
+    return None
+
+
+def note_claude_problem(message: str) -> None:
+    """Leave a plain-English note for the companion to show on the website."""
+    try:
+        (config.APP_DIR / CLAUDE_PROBLEM_FILE).write_text(message, encoding="utf-8")
+    except OSError:
+        pass
+
+
+# ---------------------------------------------------------------------------
 # Per-job execution
 # ---------------------------------------------------------------------------
 
@@ -504,8 +548,19 @@ def run_job(job: dict, port: int, worker_id: int = 0,
                     return f"failed:{reason}", duration_ms
             return "failed:unknown", duration_ms
 
+        global _last_no_result_sample
+        problem = diagnose_claude_output(output)
+        if problem:
+            code, message = problem
+            add_event(f"[W{worker_id}] CLAUDE PROBLEM ({code}): {message[:60]}")
+            update_state(worker_id, status="failed", last_action=f"Claude problem: {code}")
+            _last_no_result_sample = ""
+            note_claude_problem(message)
+            return f"claude_problem:{code}", duration_ms
         add_event(f"[W{worker_id}] NO RESULT ({elapsed}s)")
         update_state(worker_id, status="failed", last_action=f"no result ({elapsed}s)")
+        # Remember what Claude said when it ended at once, so repeated failures can be explained.
+        _last_no_result_sample = re.sub(r"\s+", " ", output).strip()[:240] if len(output) <= _SHORT_OUTPUT else ""
         return "failed:no_result_line", duration_ms
 
     except subprocess.TimeoutExpired:
@@ -580,6 +635,8 @@ def worker_loop(worker_id: int = 0, limit: int = 1,
     jobs_done = 0
     empty_polls = 0
     port = BASE_CDP_PORT + worker_id
+    claude_streak = 0      # jobs in a row that ended because Claude Code itself had a problem
+    quick_fail_streak = 0  # jobs in a row where Claude Code ended at once without a result
 
     while not _stop_event.is_set():
         if not continuous and jobs_done >= limit:
@@ -619,12 +676,27 @@ def worker_loop(worker_id: int = 0, limit: int = 1,
                 release_lock(job["url"])
                 add_event(f"[W{worker_id}] Skipped: {job['title'][:30]}")
                 continue
+            elif result.startswith("claude_problem:"):
+                # Not the job's fault: leave it untouched so it isn't charged an attempt, and stop the run once
+                # it's clear Claude Code can't work right now.
+                release_lock(job["url"])
+                claude_streak += 1
+                if claude_streak >= 2:
+                    add_event(f"[W{worker_id}] Stopping: Claude Code has a problem (see claude_problem.txt)")
+                    break
+                continue
             elif result == "applied":
+                claude_streak = quick_fail_streak = 0
                 mark_result(job["url"], "applied", duration_ms=duration_ms)
                 applied += 1
                 update_state(worker_id, jobs_applied=applied,
                              jobs_done=applied + failed)
             else:
+                claude_streak = 0
+                if result == "failed:no_result_line" and _last_no_result_sample:
+                    quick_fail_streak += 1
+                else:
+                    quick_fail_streak = 0
                 reason = result.split(":", 1)[-1] if ":" in result else result
                 mark_result(job["url"], "failed", reason,
                             permanent=_is_permanent_failure(result),
@@ -632,6 +704,13 @@ def worker_loop(worker_id: int = 0, limit: int = 1,
                 failed += 1
                 update_state(worker_id, jobs_failed=failed,
                              jobs_done=applied + failed)
+                if quick_fail_streak >= 3:
+                    note_claude_problem(
+                        "Claude Code ended without finishing 3 jobs in a row, within seconds each time. "
+                        f"What it said: \"{_last_no_result_sample}\" Check Claude Code on your PC (sign-in, "
+                        "usage limit, connection), then start the run again.")
+                    add_event(f"[W{worker_id}] Stopping: 3 quick failures in a row")
+                    break
 
         except KeyboardInterrupt:
             release_lock(job["url"])

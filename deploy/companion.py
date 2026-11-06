@@ -34,7 +34,7 @@ import urllib.request
 import zipfile
 from pathlib import Path
 
-VERSION = "9"
+VERSION = "10"
 SERVER = "__SERVER_URL__"  # filled in by the server when you download this file
 USER = "__SERVER_USER__"  # your site username, also filled in by the server
 MODEL = os.environ.get("APPLYPILOT_MODEL", "sonnet")  # Claude model used to fill in forms
@@ -368,6 +368,7 @@ def run_command(cmd: dict, cfg: dict, password: str) -> None:
         payload["error"] = f"Couldn't update ApplyPilot on your PC: {e.code}"
         _agent_post("/api/agent/done", password, payload)
         return
+    (DATA / "claude_problem.txt").unlink(missing_ok=True)  # a note left by an earlier run
     db = DATA / "applypilot.db"
     if db.exists():  # this run's outcomes start from a clean slate
         conn = sqlite3.connect(db, timeout=30)
@@ -393,6 +394,12 @@ def run_command(cmd: dict, cfg: dict, password: str) -> None:
         payload["error"] = (DATA / "problem.txt").read_text(encoding="utf-8") if (DATA / "problem.txt").exists() \
             else "Something needed on your PC is missing."
     payload["results"] = local_results()
+    note = DATA / "claude_problem.txt"
+    if note.exists() and "error" not in payload:
+        try:
+            payload["error"] = note.read_text(encoding="utf-8").strip()
+        except OSError:
+            pass
     for attempt in range(5):
         try:
             reply = _agent_post("/api/agent/done", password, payload, timeout=60)
@@ -446,6 +453,9 @@ def submit_until(goal: int, min_score: int, password: str) -> None:
         before = tried
         apply_now(goal - submitted, min_score, practice=False, password=password)
         submitted, tried = counts()
+        if (DATA / "claude_problem.txt").exists():  # Claude Code itself can't work right now
+            post_status(password, f"Submitted {submitted} of {goal}; stopped because Claude Code has a problem.")
+            break
         if tried == before:  # nothing left that auto-apply can do
             post_status(password, f"Submitted {submitted} of {goal}; no more jobs auto-apply can handle right now.")
             break
