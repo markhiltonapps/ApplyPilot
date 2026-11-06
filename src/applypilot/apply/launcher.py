@@ -315,8 +315,11 @@ _CLAUDE_PROBLEMS: list[tuple[str, re.Pattern, str]] = [
      "Claude Code says you've reached a usage limit on your Claude plan. Wait for it to reset (Claude usually "
      "says when), then start the run again."),
     ("claude_signed_out", re.compile(r"/login|not logged in|please (?:log|sign) ?in|invalid api key|"
-                                     r"oauth token|authentication[_ ]error|unauthori[sz]ed|\b401\b", re.I),
-     "Claude Code on your PC is signed out. On that PC, open Claude Code and sign in again, then start the run."),
+                                     r"oauth (?:token|session)|failed to authenticate|session expired|"
+                                     r"could not be refreshed|authentication[_ ]error|unauthori[sz]ed|\b401\b",
+                                     re.I),
+     "Claude Code on your PC is signed out (its login expired). On that PC, open Command Prompt, type claude, "
+     "then /login, and approve the sign-in in your browser. Then start the run again."),
     ("claude_busy", re.compile(r"overloaded|service unavailable|internal server error|\b529\b|\b503\b", re.I),
      "Claude's service is busy or down right now. Try again in a little while."),
 ]
