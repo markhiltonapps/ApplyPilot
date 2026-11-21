@@ -167,11 +167,15 @@ TRIAGE_BATCH = 40
 TRIAGE_PROMPT = """You screen job titles for a job seeker before a detailed review.
 {targets}
 
-Below is a numbered list of job titles, each with its company. Return the numbers of the titles that are CLEARLY a different profession from every role the candidate is looking for (for example a nurse, truck driver, translator or lab technician when the candidate wants sales or marketing roles).
+Below is a numbered list of job titles, each with its company. Return the numbers of the titles that belong to a DIFFERENT JOB FAMILY from every role the candidate is looking for.
 
-Keep a title when it could plausibly fit, when it is a neighbouring role, or when you are unsure. A detailed review follows, so wrongly keeping a title costs little and wrongly dropping one loses a good job.
+Judge by job family, not by exact wording, industry, product or seniority:
+- Business roles are one broad family: sales, account management, business development, partnerships, marketing, product, program and project management, customer success, events, solutions and presales, consulting, strategy and general management. If any target role is a business role, KEEP every title in this family, whatever the industry or level.
+- Drop only titles from another family altogether, when no target role is in that family. Examples: hands-on software, security, network or systems engineering and IT administration; clinical, lab or care work; skilled trades and driving; legal; accounting and bookkeeping; translation, language tutoring and data annotation; content creator gigs.
 
-Reply with only a JSON array of numbers, for example [2, 7]. Reply [] if none are clearly unrelated."""
+When a title could plausibly fit, or you are unsure, KEEP it. A detailed review follows, so wrongly keeping a title costs little and wrongly dropping one loses a good job.
+
+Reply with only a JSON array of the numbers to drop, for example [2, 7]. Reply [] if none belong to a different job family."""
 
 
 def skip_terms() -> list[str]:
@@ -205,6 +209,12 @@ def triage_titles(jobs: list[dict]) -> set[str]:
     if not roles or not jobs:
         return set()
     targets = "The candidate is looking for roles like: " + "; ".join(roles[:60]) + "."
+    try:
+        current = (load_profile().get("experience", {}).get("current_job_title") or "").strip()
+    except (FileNotFoundError, ValueError):
+        current = ""
+    if current:
+        targets += f" Their current or most recent title is: {current}."
     unrelated: set[str] = set()
     for start in range(0, len(jobs), TRIAGE_BATCH):
         batch = jobs[start:start + TRIAGE_BATCH]

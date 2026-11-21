@@ -288,6 +288,15 @@ def requeue_failed_scores() -> None:
                              (int(setup_form.saved_min_score(DATA_DIR)),)).rowcount
             location_marker.write_text("1")
             log(f"Re-checking {r} good-fit job(s) for location limits")
+        # One-time: the first quick title check dropped sales and account titles it should have kept.
+        # Put everything it dropped back in line to be judged under the corrected instructions.
+        triage_marker = DATA_DIR / ".requeue_title_check_v2"
+        if not triage_marker.exists():
+            r = conn.execute("UPDATE jobs SET fit_score = NULL, scored_at = NULL WHERE applied_at IS NULL "
+                             "AND fit_score = 2 AND score_reasoning LIKE '%quick title check%'").rowcount
+            triage_marker.write_text("1")
+            if r:
+                log(f"Re-checking {r} job(s) the first quick title check dropped")
         # One-time: rewrite the resumes not yet used under the tighter length rules (two pages, fewer and
         # shorter bullets). Cover letters are kept; resumes edited by hand are kept.
         length_marker = DATA_DIR / ".resume_length_v1"
