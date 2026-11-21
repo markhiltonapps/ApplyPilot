@@ -5,12 +5,30 @@ pipeline stage are created up front so any stage can run independently
 without migration ordering issues.
 """
 
+import os
 import sqlite3
 import threading
 from datetime import datetime, timezone
 from pathlib import Path
 
 from applypilot.config import DB_PATH
+
+
+def score_wait_sql() -> str:
+    """SQL condition for jobs that are waiting to be scored.
+
+    Jobs found more than SCORE_MAX_AGE_DAYS ago (default 21, 0 for no limit) are left out: most
+    such postings have closed, and a new resume would otherwise re-score months of them.
+    """
+    sql = "full_description IS NOT NULL AND fit_score IS NULL"
+    try:
+        days = int(os.environ.get("SCORE_MAX_AGE_DAYS", "21") or 0)
+    except ValueError:
+        days = 21
+    if days > 0:
+        sql += (" AND (discovered_at IS NULL OR discovered_at >= "
+                f"strftime('%Y-%m-%dT%H:%M:%S', 'now', '-{days} days'))")
+    return sql
 
 # Thread-local connection storage — each thread gets its own connection
 # (required for SQLite thread safety with parallel workers)
@@ -270,8 +288,7 @@ def get_stats(conn: sqlite3.Connection | None = None) -> dict:
     ).fetchone()[0]
 
     stats["unscored"] = conn.execute(
-        "SELECT COUNT(*) FROM jobs "
-        "WHERE full_description IS NOT NULL AND fit_score IS NULL"
+        f"SELECT COUNT(*) FROM jobs WHERE {score_wait_sql()}"
     ).fetchone()[0]
 
     # Score distribution
@@ -387,7 +404,7 @@ def get_jobs_by_stage(conn: sqlite3.Connection | None = None,
         "discovered": "1=1",
         "pending_detail": "detail_scraped_at IS NULL",
         "enriched": "full_description IS NOT NULL",
-        "pending_score": "full_description IS NOT NULL AND fit_score IS NULL",
+        "pending_score": score_wait_sql(),
         "scored": "fit_score IS NOT NULL",
         "pending_tailor": (
             "fit_score >= ? AND full_description IS NOT NULL "
