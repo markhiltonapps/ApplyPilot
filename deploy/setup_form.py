@@ -21,11 +21,10 @@ import yaml
 
 MAX_UPLOAD_BYTES = 10 * 1024 * 1024
 
-# Titles skipped in every search, copied from the packaged example config.
-EXCLUDE_TITLES = [
-    "senior director", "VP ", "vice president", "chief", "intern", "internship",
-    "co-op", "clearance required", "TS/SCI",
-]
+# Words that skip a job when they appear in its title, until the person edits the list in Setup.
+# Kept to titles nobody searching for a full-time role wants: senior titles such as "VP" or
+# "chief" are left out because many people here are looking for exactly those.
+EXCLUDE_TITLES = ["intern", "internship", "co-op", "apprentice", "apprenticeship"]
 
 US_STATES = {
     "alabama": "AL", "alaska": "AK", "arizona": "AZ", "arkansas": "AR", "california": "CA", "colorado": "CO",
@@ -462,6 +461,11 @@ def save(data_dir: Path, fields: dict[str, str], files: dict[str, tuple[str, byt
     return []
 
 
+def saved_find_only(data_dir: Path) -> bool:
+    """Whether Setup says to only find and score jobs: no resumes, no cover letters, no auto-apply."""
+    return bool(_saved_form(data_dir).get("find_only"))
+
+
 def saved_min_score(data_dir: Path) -> str:
     """Lowest fit score that gets a tailored resume, as chosen on the setup page (default 6)."""
     value = _saved_form(data_dir).get("min_score", "6")
@@ -592,7 +596,8 @@ def write_config(data_dir: Path, f: dict[str, str]) -> None:
             "hours_old": 24 * int(f.get("days_back") or 7),
             "country_indeed": INDEED_COUNTRIES.get(f["country"].lower(), f["country"].lower()),
         },
-        "exclude_titles": EXCLUDE_TITLES,
+        # A job whose title contains one of these is skipped before any AI call (see scorer.py).
+        "exclude_titles": _lines(f["skip_titles"]) if "skip_titles" in f else EXCLUDE_TITLES,
     }
     (data_dir / "searches.yaml").write_text(
         "# Written by the ApplyPilot setup page. Saving the page again overwrites this file.\n"
@@ -632,6 +637,7 @@ def render(data_dir: Path, environ: dict, values: dict[str, str] | None = None,
            errors: list[str] | None = None, saved: bool = False) -> str:
     v = {**_saved_form(data_dir), **(values or {})}
     fresh = not v
+    v.setdefault("skip_titles", "\n".join(EXCLUDE_TITLES))  # forms saved before this box existed
 
     def val(name: str, default: str = "") -> str:
         return html.escape(v.get(name, default), quote=True)
@@ -782,6 +788,13 @@ site&rsquo;s rules.</p>{pw_clear}
 {check("want_remote", "Remote jobs", True)}
 {check("want_local", "Jobs near my city", True)}
 {check("ai_only", "Only AI-focused roles (jobs where AI is a real part of the work, not just a mention)", False)}
+{area("skip_titles", "Skip jobs with these words in the title",
+       "One word or phrase per line. A job whose title contains one is skipped before the AI reads it, which "
+       "saves money. Whole words only: &ldquo;intern&rdquo; does not skip &ldquo;International&rdquo;.")}
+{check("find_only", "Find and score jobs only. Don&rsquo;t write resumes or cover letters, and pause auto-apply.",
+       False)}
+<p class="hint">Turn this on if you write your resumes somewhere else. Your matches still appear under
+<b>Ready to apply</b>, with a link to each posting. Untick it and save to switch everything back on.</p>
 <div class="row"><div>{select("days_back", "Look at jobs posted in the last",
     [("3", "3 days"), ("7", "week"), ("14", "2 weeks")], "7")}</div>
 <div>{select("min_score", "Write resumes for jobs scoring",

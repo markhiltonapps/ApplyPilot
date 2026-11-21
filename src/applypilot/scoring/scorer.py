@@ -92,21 +92,26 @@ def _parse_score_response(response: str) -> dict:
 _TARGETS: str | None = None
 
 
+def _target_roles() -> list[str]:
+    """The roles the candidate is looking for (from profile and searches), without repeats."""
+    roles: list[str] = []
+    try:
+        roles.append(load_profile().get("experience", {}).get("target_role", ""))
+    except (FileNotFoundError, ValueError):
+        pass
+    try:
+        from applypilot.config import load_search_config
+        roles += [q.get("query", "") for q in (load_search_config() or {}).get("queries", [])]
+    except Exception:  # noqa: BLE001 - targets are a hint; scoring works without them
+        pass
+    return list(dict.fromkeys(r.strip() for r in roles if r and r.strip()))
+
+
 def _targets_line() -> str:
     """One prompt line naming the roles the candidate is looking for (from profile and searches)."""
     global _TARGETS
     if _TARGETS is None:
-        roles: list[str] = []
-        try:
-            roles.append(load_profile().get("experience", {}).get("target_role", ""))
-        except (FileNotFoundError, ValueError):
-            pass
-        try:
-            from applypilot.config import load_search_config
-            roles += [q.get("query", "") for q in (load_search_config() or {}).get("queries", [])]
-        except Exception:  # noqa: BLE001 - targets are a hint; scoring works without them
-            pass
-        roles = list(dict.fromkeys(r.strip() for r in roles if r and r.strip()))
+        roles = _target_roles()
         _TARGETS = ("The candidate is looking for roles like: " + "; ".join(roles[:15])
                     + ". A job close to these and to their background should score higher than one "
                     "that only overlaps on skills." if roles else
@@ -150,6 +155,76 @@ def ai_only() -> bool:
         return bool(load_profile().get("preferences", {}).get("ai_only"))
     except (FileNotFoundError, ValueError):
         return False
+
+
+# ── Filters that run before full scoring ──────────────────────────────────
+# Full scoring sends the resume and the job description to the AI for every job. Company career
+# sites return every opening they have, so most of that was spent on jobs nobody would apply to.
+
+# Titles per quick-check call. Small enough that one bad reply only delays a few jobs.
+TRIAGE_BATCH = 40
+
+TRIAGE_PROMPT = """You screen job titles for a job seeker before a detailed review.
+{targets}
+
+Below is a numbered list of job titles, each with its company. Return the numbers of the titles that are CLEARLY a different profession from every role the candidate is looking for (for example a nurse, truck driver, translator or lab technician when the candidate wants sales or marketing roles).
+
+Keep a title when it could plausibly fit, when it is a neighbouring role, or when you are unsure. A detailed review follows, so wrongly keeping a title costs little and wrongly dropping one loses a good job.
+
+Reply with only a JSON array of numbers, for example [2, 7]. Reply [] if none are clearly unrelated."""
+
+
+def skip_terms() -> list[str]:
+    """Words or phrases from Setup: a job whose title contains one is skipped without using AI."""
+    try:
+        from applypilot.config import load_search_config
+        terms = (load_search_config() or {}).get("exclude_titles") or []
+    except Exception:  # noqa: BLE001 - no list means nothing is skipped
+        return []
+    return [str(t).strip() for t in terms if str(t).strip()]
+
+
+def title_skip_term(title: str, terms: list[str]) -> str | None:
+    """The first skip term that appears in the title as a whole word or phrase, if any.
+
+    Whole words only, so "intern" skips "Marketing Intern" but not "International Sales Manager".
+    """
+    for term in terms:
+        if re.search(rf"(?<![A-Za-z0-9]){re.escape(term)}(?![A-Za-z0-9])", title or "", re.IGNORECASE):
+            return term
+    return None
+
+
+def triage_titles(jobs: list[dict]) -> set[str]:
+    """URLs of jobs whose title is clearly unrelated to the roles the candidate wants.
+
+    One small AI call per batch of titles, in place of a full scoring call per job. Any problem
+    (no target roles, the AI refusing, a reply that isn't a list) keeps the jobs for full scoring.
+    """
+    roles = _target_roles()
+    if not roles or not jobs:
+        return set()
+    targets = "The candidate is looking for roles like: " + "; ".join(roles[:60]) + "."
+    unrelated: set[str] = set()
+    for start in range(0, len(jobs), TRIAGE_BATCH):
+        batch = jobs[start:start + TRIAGE_BATCH]
+        listing = "\n".join(
+            f"{i + 1}. {(j.get('title') or '?')[:120]} "
+            f"({company_for(j.get('company'), j.get('site'), j.get('application_url')) or j.get('site') or '?'})"
+            for i, j in enumerate(batch))
+        try:
+            reply = get_client().chat(
+                [{"role": "system", "content": TRIAGE_PROMPT.replace("{targets}", targets)},
+                 {"role": "user", "content": listing}], max_tokens=256, temperature=0.0)
+            found = re.search(r"\[[\d,\s]*\]", reply or "")
+            numbers = json.loads(found.group(0)) if found else []
+        except Exception as e:  # noqa: BLE001 - the quick check is an optimisation, never a blocker
+            log.warning("Quick title check failed (%s); these %d jobs get a full score instead.", e, len(batch))
+            continue
+        picked = {n for n in numbers if isinstance(n, int) and 1 <= n <= len(batch)}
+        unrelated.update(batch[n - 1]["url"] for n in picked)
+        log.info("Quick title check: %d of %d titles are unrelated and skip full scoring.", len(picked), len(batch))
+    return unrelated
 
 
 def score_job(resume_text: str, job: dict) -> dict:
@@ -219,8 +294,24 @@ def run_scoring(limit: int = 0, rescore: bool = False) -> dict:
     errors = 0
     results: list[dict] = []
 
+    # Decide what can be scored without a full AI call: titles on the skip list (free), then
+    # titles a quick check finds unrelated (one small call for the whole batch).
+    terms = skip_terms()
+    preset: dict[str, dict] = {}
     for job in jobs:
-        result = score_job(resume_text, job)
+        term = title_skip_term(job.get("title") or "", terms)
+        if term:
+            preset[job["url"]] = {"score": 1, "keywords": "", "reasoning": (
+                f'Skipped without using AI: the title contains "{term}", which is on your skip list in Setup.')}
+    for url in triage_titles([j for j in jobs if j["url"] not in preset]):
+        preset[url] = {"score": 2, "keywords": "", "reasoning": (
+            "Skipped after a quick title check: the title is unrelated to the roles you are looking for. "
+            "The full description was not reviewed.")}
+    if preset:
+        log.info("%d of %d jobs skip full scoring.", len(preset), len(jobs))
+
+    for job in jobs:
+        result = dict(preset.get(job["url"]) or score_job(resume_text, job))
         result["url"] = job["url"]
         completed += 1
 

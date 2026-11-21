@@ -1035,6 +1035,17 @@ def _run_all(
     total_new = 0
     total_existing = 0
 
+    # Reading career sites with AI is the slowest and costliest way to find jobs, and one stuck
+    # site used to hold a run for hours. Sites not started within the limit wait for the next run.
+    limit_min = float(os.environ.get("SMART_EXTRACT_MAX_MINUTES", "45") or 0)
+    deadline = time.time() + limit_min * 60 if limit_min > 0 else None
+
+    def _run_site(name: str, url: str) -> dict:
+        if deadline and time.time() > deadline:
+            return {"name": name, "status": "SKIP", "jobs": [], "strategy": "-",
+                    "error": f"not started: {limit_min:g} minute limit reached"}
+        return _run_one_site(name, url)
+
     def _process_result(r: dict, target: dict) -> None:
         nonlocal total_new, total_existing
         jobs = r.get("jobs", [])
@@ -1050,7 +1061,7 @@ def _run_all(
         # Parallel mode
         with ThreadPoolExecutor(max_workers=min(workers, len(targets))) as pool:
             future_to_target = {
-                pool.submit(_run_one_site, target["name"], target["url"]): target
+                pool.submit(_run_site, target["name"], target["url"]): target
                 for target in targets
             }
             for future in as_completed(future_to_target):
@@ -1066,7 +1077,7 @@ def _run_all(
                 label = f"{target['name']} [{target['query']}]"
             log.info("[%d/%d] %s", i + 1, len(targets), label)
 
-            r = _run_one_site(target["name"], target["url"])
+            r = _run_site(target["name"], target["url"])
             results.append(r)
             _process_result(r, target)
 

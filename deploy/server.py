@@ -55,6 +55,9 @@ USER = os.environ.get("DASHBOARD_USER", "applypilot")
 INTERVAL_HOURS = float(os.environ.get("RUN_INTERVAL_HOURS", "12"))
 RUN_ON_START = os.environ.get("RUN_ON_START", "true").lower() in ("1", "true", "yes")
 RUN_ARGS = shlex.split(os.environ.get("RUN_ARGS", "--validation normal --stream --workers 2"))
+# `applypilot run` stages. With "Find and score jobs only" on in Setup, a run stops after FIND_STAGES.
+FIND_STAGES = ("discover", "enrich", "score")
+WRITE_STAGES = ("tailor", "cover", "pdf")
 
 # Output folders that may be browsed and downloaded from the dashboard.
 SERVED_DIRS = ("tailored_resumes", "cover_letters")
@@ -376,6 +379,8 @@ def run_pipeline(wait: bool = False) -> None:
 
         requeue_failed_scores()
         args = list(RUN_ARGS)
+        if setup_form.saved_find_only(DATA_DIR) and not any(a in FIND_STAGES + WRITE_STAGES for a in args):
+            args = [*FIND_STAGES, *args]  # stop after scoring: nothing is written
         if "--min-score" not in args:
             args += ["--min-score", setup_form.saved_min_score(DATA_DIR)]
         cmd = [sys.executable, "-m", "applypilot", "run", *args]
@@ -638,7 +643,8 @@ def status_html() -> bytes:
 <summary><b>How it works</b></summary>
 <ol class="steps" style="margin-top:16px">
 <li><b>It searches for you.</b> <span class="muted">Every 12 hours it finds jobs matching your titles,
- scores each one 1&ndash;10 against your resume, and writes a tailored resume and cover letter for every job
+ scores each one 1&ndash;10 against your resume, and {"lists every job" if setup_form.saved_find_only(DATA_DIR)
+ else "writes a tailored resume and cover letter for every job"}
  scoring {setup_form.saved_min_score(DATA_DIR)} or more (you can change this in Setup). Nothing to press.</span></li>
 <li><b>Open Ready to apply.</b> <span class="muted">Your best matches, highest score first, each with its own
  resume and cover letter.</span></li>
@@ -823,7 +829,11 @@ def _tailored_jobs() -> list:
                 "cover_letter_path, applied_at, apply_status, apply_error, COALESCE(apply_attempts, 0) AS apply_attempts "
                 "FROM jobs WHERE applied_at IS NOT NULL OR (tailored_resume_path IS NOT NULL "
                 "AND (fit_score IS NULL OR fit_score >= ?)) "
-                "ORDER BY fit_score DESC, tailored_at DESC", (int(setup_form.saved_min_score(DATA_DIR)),)).fetchall()
+                # Find-only mode writes no resumes, so a good match is listed as soon as it is scored.
+                + ("OR fit_score >= ? " if setup_form.saved_find_only(DATA_DIR) else "") +
+                "ORDER BY fit_score DESC, tailored_at DESC",
+                (int(setup_form.saved_min_score(DATA_DIR)),) * (2 if setup_form.saved_find_only(DATA_DIR) else 1)
+            ).fetchall()
             conn.close()
         except sqlite3.Error as e:
             log(f"Ready page query failed: {e}")
@@ -1043,9 +1053,11 @@ def ready_html(view: str = "") -> bytes:
     jobs = _tailored_jobs()
     if not jobs:
         c = job_counts() or {"good_fit": 0}
+        find_only = setup_form.saved_find_only(DATA_DIR)
         note = (f"{c['good_fit']} good fits found so far. Their resumes are being written now."
-                if c["good_fit"] else f"Jobs scoring {setup_form.saved_min_score(DATA_DIR)} or more will show up here "
-                "with their own resume and cover letter.")
+                if c["good_fit"] and not find_only
+                else f"Jobs scoring {setup_form.saved_min_score(DATA_DIR)} or more will show up here "
+                + ("as soon as they are scored." if find_only else "with their own resume and cover letter."))
         body = f"""<h1>Ready to apply</h1>{ai_banner()}
 <div class="card empty"><div class="big">📝</div><h2>Nothing ready yet</h2>
 <p class="muted">{note}</p><a class="btn ghost" href="/status">Check progress</a></div>"""
@@ -1105,12 +1117,16 @@ resume and cover letter are already written: click <b>Apply</b>, fill in the for
     body = f"""<h1>Ready to apply</h1>
 <p class="sub">{len(todo)} to apply, best match first{f", {len(done)} applied" if done else ""}. These are all
 jobs scoring {setup_form.saved_min_score(DATA_DIR)} or more ({sum(1 for j in todo if (j["fit_score"] or 0) >= 7)} of
-them score 7+, which the Jobs tab calls a strong fit). Download the resume,
+them score 7+, which the Jobs tab calls a strong fit). {FIND_ONLY_NOTE if setup_form.saved_find_only(DATA_DIR)
+else "Download the resume,"}
 apply, then tick <b>I applied</b> so you never apply twice.</p>
 <div class="stack">{todo_html}</div>{done_html}"""
     return page("Ready to apply", body.replace("<h1>Ready to apply</h1>", "<h1>Ready to apply</h1>" + tabs, 1),
                 "ready", READY_CSS)
 
+
+FIND_ONLY_NOTE = ("Find-only mode is on (<a href=\"/setup\">Setup</a>), so no resumes are written here and "
+                  "auto-apply is paused. Click <b>Apply</b> to open the posting,")
 
 READY_CSS = """<style>
 .tabs{display:flex;gap:6px;margin:4px 0 16px;border-bottom:1px solid var(--line)}
@@ -1300,8 +1316,8 @@ def pays_below(salary: str | None, floor: int) -> bool:
 def apply_candidates() -> tuple[list, int]:
     """Jobs auto-apply can take on, best first, and how many more were left out because they need an account."""
     import sqlite3
-    if not (DATA_DIR / "applypilot.db").exists():
-        return [], 0
+    if not (DATA_DIR / "applypilot.db").exists() or setup_form.saved_find_only(DATA_DIR):
+        return [], 0  # find-only mode pauses auto-apply, including for resumes written earlier
     conn = sqlite3.connect(f"file:{DATA_DIR / 'applypilot.db'}?mode=ro", uri=True, timeout=10)
     conn.row_factory = sqlite3.Row
     rows = conn.execute(
