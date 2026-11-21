@@ -8,8 +8,8 @@ Three kinds:
 Indeed is still searched through JobSpy. ZipRecruiter refuses cloud servers, and JobSpy's LinkedIn search is
 rate-limited on every search from one, so LinkedIn is searched here instead, slowly.
 
-The boards and company lists return every opening, so a job is kept only when its title matches one of the
-job types in searches.yaml. LinkedIn is already searched by job type.
+The boards and company lists return every opening, so a job is kept only when its title is the kind of job
+one of the job types in searches.yaml describes (see title_matcher). LinkedIn is already searched by job type.
 """
 
 from __future__ import annotations
@@ -37,6 +37,7 @@ from applypilot.discovery.jobspy import _location_ok
 from applypilot.discovery.workday import strip_html
 
 log = logging.getLogger(__name__)
+logging.getLogger("httpx").setLevel(logging.WARNING)  # one line per request would bury the search log
 
 HEADERS = {
     "User-Agent": "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0 Safari/537.36",
@@ -44,6 +45,7 @@ HEADERS = {
 }
 STATE_PATH = APP_DIR / "feeds_state.json"
 STRATEGY = "feed"
+MATCH_VERSION = 2  # raise when title or place matching changes, so the boards are read again straight away
 
 
 def _env_int(name: str, default: int) -> int:
@@ -76,21 +78,35 @@ def _title_words(text: str) -> set[str]:
     return words
 
 
-def title_matcher(queries: list[str]):
-    """A function saying whether a job title matches any searched job type.
+# Words that say how senior a job is, not what it is: ignored when comparing titles.
+_LEVEL = {"senior", "junior", "principal", "staff", "founding", "associate", "i", "ii", "iii", "iv"}
+# Words nearly every title has one of: two titles sharing only these are not the same kind of job.
+_ROLE = {"manager", "lead", "engineer", "architect", "consultant", "strategist", "advisor", "director", "head",
+         "specialist", "analyst", "vp", "officer", "executive", "leader"}
 
-    A title matches when it holds every word of one job type, in any order: "AI Solutions Architect" matches
-    "Senior Solutions Architect, Applied AI". Filler words (of, the, and...) are ignored.
+
+def title_matcher(queries: list[str]):
+    """A function saying whether a job title is the kind of job one of the searched job types describes.
+
+    Boards and company lists can't be searched the way Indeed can, so this stands in for the search. A title
+    matches a job type when it shares two of its words, at least one of them saying what the job is about
+    rather than just "manager" or "lead": "Voice AI Solutions Architect" matches "Solutions Architect" and
+    "Solutions Engineer, Applied AI", but not "Engineering Manager". A job type of a single word needs that
+    word. Seniority (senior, principal...) and filler words are ignored. Scoring then judges the real fit.
     """
     wanted = []
     for q in queries:
-        words = frozenset(_title_words(q) - _STOP)
+        words = frozenset(_title_words(q) - _STOP - _LEVEL)
         if words and words not in wanted:
             wanted.append(words)
 
     def match(title: str | None) -> bool:
         have = _title_words(title or "")
-        return any(w <= have for w in wanted)
+        for words in wanted:
+            shared = words & have
+            if len(shared) >= min(2, len(words)) and (shared - _ROLE or len(words) == 1):
+                return True
+        return False
 
     return match
 
@@ -108,6 +124,8 @@ _ELSEWHERE = re.compile(
     r"sweden|norway|denmark|finland|estonia|czech|czechia|hungary|greece|turkey|israel|uae|dubai|"
     r"saudi arabia|egypt|nigeria|kenya|south africa|india|pakistan|bangladesh|sri lanka|china|hong kong|"
     r"taiwan|japan|korea|singapore|malaysia|indonesia|thailand|vietnam|philippines|australia|new zealand|"
+    r"lithuania|latvia|bulgaria|serbia|croatia|slovakia|slovenia|luxembourg|iceland|cyprus|malta|"
+    r"armenia|kazakhstan|morocco|ghana|costa rica|uruguay|ecuador|venezuela|guatemala|panama|dominican republic|"
     r"london|berlin|paris|amsterdam|dublin|toronto|vancouver|bangalore|bengaluru|sydney|tokyo|munich|madrid|"
     r"barcelona|lisbon|warsaw|stockholm|zurich|tel aviv)\b", re.I)
 
@@ -684,7 +702,7 @@ def run_feeds_discovery(cfg: dict | None = None) -> dict:
     every = _env_int("FEEDS_EVERY_HOURS", 6)
     # Changed job types, places or skip words: read everything again rather than wait.
     search_key = hashlib.sha256(json.dumps(
-        [f.queries, f.locations, f.accept, f.hours_old, f.country, f._skip_terms], sort_keys=True, default=str,
+        [MATCH_VERSION, f.queries, f.locations, f.accept, f.hours_old, f.country, f._skip_terms], sort_keys=True, default=str,
     ).encode()).hexdigest()[:16]
     if state.get("search_key") != search_key:
         state = {"search_key": search_key, "linkedin_passed_over": state.get("linkedin_passed_over", [])}
