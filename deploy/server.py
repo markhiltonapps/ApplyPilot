@@ -269,6 +269,22 @@ def requeue_failed_scores() -> None:
                              "WHERE fit_score IS NOT NULL AND applied_at IS NULL").rowcount
             marker.write_text(version)
             log(f"Resume or scoring preferences changed; re-scoring {m} job(s)")
+        # Whenever the list of requirements the person doesn't meet changes: a new item can only lower scores,
+        # so only jobs at 5 or above are scored again; a removed item can raise any, so all are.
+        from applypilot.scoring.scorer import cannot_do
+        lacking = cannot_do()
+        lacking_marker = DATA_DIR / ".rescore_cannot_do"
+        try:
+            before = json.loads(lacking_marker.read_text()) if lacking_marker.exists() else []
+        except ValueError:
+            before = []
+        if set(lacking) != set(before):
+            removed = bool(set(before) - set(lacking))
+            c = conn.execute("UPDATE jobs SET fit_score = NULL, scored_at = NULL WHERE applied_at IS NULL "
+                             "AND fit_score IS NOT NULL AND (? OR fit_score >= 5) "
+                             "AND COALESCE(apply_status, '') != 'skipped'", (removed,)).rowcount
+            lacking_marker.write_text(json.dumps(lacking))
+            log(f"Requirements you don't meet changed; re-scoring {c} job(s)")
         # Whenever the salary minimum is set or changed, re-score the good fits under it, so jobs whose posting
         # states lower pay drop off Ready to apply.
         floor = _min_salary()

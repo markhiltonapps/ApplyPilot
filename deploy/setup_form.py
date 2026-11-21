@@ -461,6 +461,19 @@ def save(data_dir: Path, fields: dict[str, str], files: dict[str, tuple[str, byt
     return []
 
 
+def _cannot_do(data_dir: Path, f: dict[str, str]) -> dict:
+    """The "requirements you don't meet" list to store. A form sent from a page loaded before the box
+    existed has no such field: keep what was saved rather than wiping it (and store nothing if nothing was,
+    so a list seeded by the host still applies)."""
+    if "cannot_do" in f:
+        return {"cannot_do": [x.strip() for x in f["cannot_do"].splitlines() if x.strip()]}  # commas stay
+    try:
+        old = json.loads((data_dir / "profile.json").read_text(encoding="utf-8")).get("preferences", {})
+    except (OSError, ValueError):
+        old = {}
+    return {"cannot_do": old["cannot_do"]} if isinstance(old.get("cannot_do"), list) else {}
+
+
 def saved_find_only(data_dir: Path) -> bool:
     """Whether Setup says to only find and score jobs: no resumes, no cover letters, no auto-apply."""
     return bool(_saved_form(data_dir).get("find_only"))
@@ -567,7 +580,7 @@ def write_config(data_dir: Path, f: dict[str, str]) -> None:
             "preserved_school": f.get("school", ""),
             "real_metrics": _lines(f.get("metrics", "")),
         },
-        "preferences": {"ai_only": bool(f.get("ai_only"))},
+        "preferences": {"ai_only": bool(f.get("ai_only")), **_cannot_do(data_dir, f)},
         "application_answers": application_answers(f),
         "eeo_voluntary": {
             "gender": f.get("eeo_gender") or DECLINE,
@@ -638,6 +651,9 @@ def render(data_dir: Path, environ: dict, values: dict[str, str] | None = None,
     v = {**_saved_form(data_dir), **(values or {})}
     fresh = not v
     v.setdefault("skip_titles", "\n".join(EXCLUDE_TITLES))  # forms saved before this box existed
+    # Not saved yet: show what the host seeded, which scoring uses until this box is saved.
+    v.setdefault("cannot_do", "\n".join(
+        x.strip() for x in re.split(r"[;\n]", environ.get("APPLYPILOT_CANNOT_DO", "")) if x.strip()))
 
     def val(name: str, default: str = "") -> str:
         return html.escape(v.get(name, default), quote=True)
@@ -788,6 +804,10 @@ site&rsquo;s rules.</p>{pw_clear}
 {check("want_remote", "Remote jobs", True)}
 {check("want_local", "Jobs near my city", True)}
 {check("ai_only", "Only AI-focused roles (jobs where AI is a real part of the work, not just a mention)", False)}
+{area("cannot_do", "Requirements you don&rsquo;t meet",
+       "One per line, in your own words, e.g. &ldquo;Writing code in a programming language such as Python or "
+       "JavaScript&rdquo; or &ldquo;Security clearance&rdquo;. A job that requires one scores 4 or lower, so it "
+       "stays off your matches. Jobs that only list it as nice to have are not marked down.")}
 {area("skip_titles", "Skip jobs with these words in the title",
        "One word or phrase per line. A job whose title contains one is skipped before the AI reads it, which "
        "saves money. Whole words only: &ldquo;intern&rdquo; does not skip &ldquo;International&rdquo;.")}

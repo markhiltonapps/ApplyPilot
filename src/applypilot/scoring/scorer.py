@@ -7,6 +7,7 @@ profile and resume file.
 
 import json
 import logging
+import os
 import re
 import time
 from datetime import datetime, timezone
@@ -135,7 +136,29 @@ def _targets_line() -> str:
             _TARGETS += ("\n- The candidate ONLY wants roles where AI (machine learning, generative AI, LLMs, AI agents "
                          "or AI products) is central to the day-to-day work. If AI appears only in the company "
                          "description or is a minor part of the job, score 4 or lower however well the rest fits.")
+        lacking = cannot_do()
+        if lacking:
+            _TARGETS += ("\n- The candidate does NOT have the following, even where the resume could be read as "
+                         "suggesting otherwise: " + "; ".join(lacking) + ". If the posting lists any of these as a "
+                         "requirement or as a core part of the work, score 4 or lower however well the rest fits, and "
+                         "name the unmet requirement in the reasoning. Ignore one that is only preferred, a "
+                         "nice-to-have, or one of several alternatives the candidate can otherwise meet.")
     return _TARGETS
+
+
+def cannot_do() -> list[str]:
+    """Requirements the candidate says they don't meet (Setup): a job that needs one scores 4 or lower.
+
+    Until Setup has been saved with that box, the host can seed the list through APPLYPILOT_CANNOT_DO
+    (items separated by ";" or new lines); once it has been saved, Setup is what counts.
+    """
+    try:
+        saved = load_profile().get("preferences", {}).get("cannot_do")
+    except (FileNotFoundError, ValueError):
+        saved = None
+    if saved is None:
+        saved = re.split(r"[;\n]", os.environ.get("APPLYPILOT_CANNOT_DO", ""))
+    return [str(x).strip() for x in saved if str(x).strip()]
 
 
 def min_salary() -> int:
