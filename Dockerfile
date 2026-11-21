@@ -13,7 +13,9 @@ WORKDIR /app
 
 # tini as PID 1 reaps orphaned browser processes; without it they pile up as zombies until the
 # container can't start new threads and the web server stops answering.
-RUN apt-get update && apt-get install -y --no-install-recommends tini && rm -rf /var/lib/apt/lists/*
+# libatomic1: the Node binary bundled with current Playwright releases needs it, and the slim
+# image doesn't have it, so `playwright install` below fails without it.
+RUN apt-get update && apt-get install -y --no-install-recommends tini libatomic1 && rm -rf /var/lib/apt/lists/*
 
 COPY pyproject.toml README.md LICENSE ./
 COPY src ./src
