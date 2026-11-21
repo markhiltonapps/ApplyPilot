@@ -11,7 +11,8 @@ import re
 from urllib.parse import urlparse
 
 JOB_BOARDS = {"indeed", "linkedin", "glassdoor", "zip_recruiter", "ziprecruiter", "google", "bayt", "naukri",
-              "bdjobs", "monster", "dice", "simplyhired", "careerbuilder", "jobspy"}
+              "bdjobs", "monster", "dice", "simplyhired", "careerbuilder", "jobspy",
+              "remotive", "remote_ok", "himalayas", "jobicy", "we_work_remotely", "working_nomads"}
 
 # Applicant-tracking systems that put the employer's slug in the path, and the hosts that carry it as a subdomain.
 _PATH_HOSTS = ("greenhouse.io", "lever.co", "ashbyhq.com", "smartrecruiters.com", "workable.com", "jobvite.com",
@@ -80,6 +81,7 @@ def board_label(site: str | None) -> str | None:
     """'Indeed', 'LinkedIn'... for jobs found on a board; None when the site is the employer itself."""
     if not is_job_board(site):
         return None
-    names = {"linkedin": "LinkedIn", "zip_recruiter": "ZipRecruiter", "ziprecruiter": "ZipRecruiter"}
+    names = {"linkedin": "LinkedIn", "zip_recruiter": "ZipRecruiter", "ziprecruiter": "ZipRecruiter",
+             "remote_ok": "Remote OK"}
     key = (site or "").strip().lower().replace(" ", "_")
     return names.get(key, key.replace("_", " ").title())

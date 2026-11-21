@@ -102,29 +102,10 @@ sites:
     type: search
 
   # ── Static sites (no query params, scraped once) ─────────────────────
-  # Remote-first boards
-  - name: "RemoteOK"
-    url: "https://remoteok.com/remote-dev-jobs"
-    type: static
-
-  - name: "WeWorkRemotely"
-    url: "https://weworkremotely.com/categories/remote-programming-jobs"
-    type: static
-
-  - name: "Remotive"
-    url: "https://remotive.com/remote-jobs/software-dev"
-    type: static
-
+  # Remote-first boards. Remote OK, We Work Remotely, Remotive, Himalayas and Working Nomads are read
+  # from their free feeds instead (discovery/feeds.py), which covers every job category at no AI cost.
   - name: "JustRemote"
     url: "https://justremote.co/remote-developer-jobs"
-    type: static
-
-  - name: "Himalayas"
-    url: "https://himalayas.app/jobs/developer"
-    type: static
-
-  - name: "Working Nomads"
-    url: "https://www.workingnomads.com/jobs?category=development"
     type: static
 
   - name: "Remote.co"

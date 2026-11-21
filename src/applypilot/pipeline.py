@@ -35,7 +35,7 @@ console = Console()
 STAGE_ORDER = ("discover", "enrich", "score", "tailor", "cover", "pdf")
 
 STAGE_META: dict[str, dict] = {
-    "discover": {"desc": "Job discovery (JobSpy + Workday + smart extract)"},
+    "discover": {"desc": "Job discovery (job feeds + JobSpy + LinkedIn + Workday + smart extract)"},
     "enrich":   {"desc": "Detail enrichment (full descriptions + apply URLs)"},
     "score":    {"desc": "LLM scoring (fit 1-10)"},
     "tailor":   {"desc": "Resume tailoring (LLM + validation)"},
@@ -60,8 +60,19 @@ _UPSTREAM: dict[str, str | None] = {
 # ---------------------------------------------------------------------------
 
 def _run_discover(workers: int = 1) -> dict:
-    """Stage: Job discovery — JobSpy, Workday, and smart-extract scrapers."""
-    stats: dict = {"jobspy": None, "workday": None, "smartextract": None}
+    """Stage: Job discovery — free job feeds, JobSpy, Workday, and smart-extract scrapers."""
+    stats: dict = {"feeds": None, "jobspy": None, "linkedin": None, "workday": None, "smartextract": None}
+
+    # Free sources first (job boards with public feeds, company job boards): quick, and no AI.
+    console.print("  [cyan]Free job sources (remote job boards, company job boards)...[/cyan]")
+    try:
+        from applypilot.discovery.feeds import run_feeds_discovery
+        run_feeds_discovery()
+        stats["feeds"] = "ok"
+    except Exception as e:
+        log.error("Free job sources failed: %s", e)
+        console.print(f"  [red]Free job sources error:[/red] {e}")
+        stats["feeds"] = f"error: {e}"
 
     # JobSpy
     console.print("  [cyan]JobSpy full crawl...[/cyan]")
@@ -73,6 +84,17 @@ def _run_discover(workers: int = 1) -> dict:
         log.error("JobSpy crawl failed: %s", e)
         console.print(f"  [red]JobSpy error:[/red] {e}")
         stats["jobspy"] = f"error: {e}"
+
+    # LinkedIn: free but rate-limited, so it is searched slowly and for a limited time each run.
+    console.print("  [cyan]LinkedIn...[/cyan]")
+    try:
+        from applypilot.discovery.feeds import run_linkedin_discovery
+        run_linkedin_discovery()
+        stats["linkedin"] = "ok"
+    except Exception as e:
+        log.error("LinkedIn search failed: %s", e)
+        console.print(f"  [red]LinkedIn error:[/red] {e}")
+        stats["linkedin"] = f"error: {e}"
 
     # Workday corporate scraper
     console.print("  [cyan]Workday corporate scraper...[/cyan]")

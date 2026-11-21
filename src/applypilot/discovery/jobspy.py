@@ -374,7 +374,9 @@ def _full_crawl(
 ) -> dict:
     """Run all search queries from search config across all locations."""
     if sites is None:
-        sites = ["indeed", "linkedin", "zip_recruiter"]
+        # Without a proxy, ZipRecruiter refuses cloud servers outright and LinkedIn rate-limits every search
+        # (and can't be asked for remote jobs here); LinkedIn is searched in discovery/feeds.py instead.
+        sites = ["indeed", "linkedin", "zip_recruiter"] if proxy else ["indeed"]
 
     # Build search combinations from config
     queries = search_cfg.get("queries", [])
