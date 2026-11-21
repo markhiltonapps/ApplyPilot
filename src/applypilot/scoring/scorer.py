@@ -224,6 +224,9 @@ def triage_titles(jobs: list[dict]) -> set[str]:
         picked = {n for n in numbers if isinstance(n, int) and 1 <= n <= len(batch)}
         unrelated.update(batch[n - 1]["url"] for n in picked)
         log.info("Quick title check: %d of %d titles are unrelated and skip full scoring.", len(picked), len(batch))
+        if picked:
+            log.info("Quick title check dropped: %s", "; ".join(
+                (batch[n - 1].get("title") or "?")[:50] for n in sorted(picked)))
     return unrelated
 
 
@@ -294,43 +297,49 @@ def run_scoring(limit: int = 0, rescore: bool = False) -> dict:
     errors = 0
     results: list[dict] = []
 
-    # Decide what can be scored without a full AI call: titles on the skip list (free), then
-    # titles a quick check finds unrelated (one small call for the whole batch).
+    # Work through the jobs a group at a time, newest first, so scores start appearing straight
+    # away even when thousands are waiting (a new resume re-scores everything). For each group,
+    # first decide what can be scored without a full AI call: titles on the skip list (free), then
+    # titles a quick check finds unrelated (one small call for the whole group).
     terms = skip_terms()
-    preset: dict[str, dict] = {}
-    for job in jobs:
-        term = title_skip_term(job.get("title") or "", terms)
-        if term:
-            preset[job["url"]] = {"score": 1, "keywords": "", "reasoning": (
-                f'Skipped without using AI: the title contains "{term}", which is on your skip list in Setup.')}
-    for url in triage_titles([j for j in jobs if j["url"] not in preset]):
-        preset[url] = {"score": 2, "keywords": "", "reasoning": (
-            "Skipped after a quick title check: the title is unrelated to the roles you are looking for. "
-            "The full description was not reviewed.")}
-    if preset:
-        log.info("%d of %d jobs skip full scoring.", len(preset), len(jobs))
+    skipped = 0
+    for start in range(0, len(jobs), TRIAGE_BATCH):
+        group = jobs[start:start + TRIAGE_BATCH]
+        preset: dict[str, dict] = {}
+        for job in group:
+            term = title_skip_term(job.get("title") or "", terms)
+            if term:
+                preset[job["url"]] = {"score": 1, "keywords": "", "reasoning": (
+                    f'Skipped without using AI: the title contains "{term}", which is on your skip list in Setup.')}
+        for url in triage_titles([j for j in group if j["url"] not in preset]):
+            preset[url] = {"score": 2, "keywords": "", "reasoning": (
+                "Skipped after a quick title check: the title is unrelated to the roles you are looking for. "
+                "The full description was not reviewed.")}
+        skipped += len(preset)
 
-    for job in jobs:
-        result = dict(preset.get(job["url"]) or score_job(resume_text, job))
-        result["url"] = job["url"]
-        completed += 1
+        for job in group:
+            result = dict(preset.get(job["url"]) or score_job(resume_text, job))
+            result["url"] = job["url"]
+            completed += 1
 
-        if result["score"] == 0:
-            errors += 1
+            if result["score"] == 0:
+                errors += 1
 
-        results.append(result)
-        # Save each score right away so progress shows up (and survives a restart).
-        conn.execute(
-            "UPDATE jobs SET fit_score = ?, score_reasoning = ?, scored_at = ? WHERE url = ?",
-            (result["score"], f"{result['keywords']}\n{result['reasoning']}",
-             datetime.now(timezone.utc).isoformat(), result["url"]),
-        )
-        conn.commit()
+            results.append(result)
+            # Save each score right away so progress shows up (and survives a restart).
+            conn.execute(
+                "UPDATE jobs SET fit_score = ?, score_reasoning = ?, scored_at = ? WHERE url = ?",
+                (result["score"], f"{result['keywords']}\n{result['reasoning']}",
+                 datetime.now(timezone.utc).isoformat(), result["url"]),
+            )
+            conn.commit()
 
-        log.info(
-            "[%d/%d] score=%d  %s",
-            completed, len(jobs), result["score"], job.get("title", "?")[:60],
-        )
+            log.info(
+                "[%d/%d] score=%d  %s",
+                completed, len(jobs), result["score"], job.get("title", "?")[:60],
+            )
+    if skipped:
+        log.info("%d of %d jobs skipped full scoring.", skipped, len(jobs))
 
     elapsed = time.time() - t0
     log.info("Done: %d scored in %.1fs (%.1f jobs/sec)", len(results), elapsed, len(results) / elapsed if elapsed > 0 else 0)
