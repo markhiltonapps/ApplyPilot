@@ -143,22 +143,51 @@ def _targets_line() -> str:
                          "requirement or as a core part of the work, score 4 or lower however well the rest fits, and "
                          "name the unmet requirement in the reasoning. Ignore one that is only preferred, a "
                          "nice-to-have, or one of several alternatives the candidate can otherwise meet.")
+        wanted = target_companies()
+        if wanted:
+            _TARGETS += ("\n- Companies the candidate especially wants to work for: " + ", ".join(wanted[:80]) + ". A "
+                         "role there that suits them scores one point higher than the same role elsewhere.")
+        notes = focus_notes()
+        if notes:
+            _TARGETS += ("\n- The candidate's own notes on what they want are between the lines of dashes below. "
+                         "They are priorities for ranking, not extra experience to credit. A posting in the areas they "
+                         "rank highest scores higher than an equally good fit elsewhere, even when its title is "
+                         "generic; each signal they ask to boost counts in its favour; what they say to exclude scores "
+                         "4 or lower; and what they say to de-prioritize scores about two points lower than it "
+                         "otherwise would. Mention in the reasoning which of their priorities or exclusions applied. "
+                         "Anything in the notes about how to write resumes does not affect the score."
+                         f"\n-----\n{notes}\n-----")
     return _TARGETS
 
 
-def cannot_do() -> list[str]:
-    """Requirements the candidate says they don't meet (Setup): a job that needs one scores 4 or lower.
-
-    Until Setup has been saved with that box, the host can seed the list through APPLYPILOT_CANNOT_DO
-    (items separated by ";" or new lines); once it has been saved, Setup is what counts.
-    """
+def _preference(name: str, env: str):
+    """A preference saved in Setup, or what the host seeded in an environment variable until Setup has been
+    saved with that box. Once it has been saved (even empty), Setup is what counts."""
     try:
-        saved = load_profile().get("preferences", {}).get("cannot_do")
+        saved = load_profile().get("preferences", {}).get(name)
     except (FileNotFoundError, ValueError):
         saved = None
-    if saved is None:
-        saved = re.split(r"[;\n]", os.environ.get("APPLYPILOT_CANNOT_DO", ""))
-    return [str(x).strip() for x in saved if str(x).strip()]
+    return os.environ.get(env, "") if saved is None else saved
+
+
+def _as_list(value, pattern: str) -> list[str]:
+    items = re.split(pattern, value) if isinstance(value, str) else (value or [])
+    return [str(x).strip() for x in items if str(x).strip()]
+
+
+def cannot_do() -> list[str]:
+    """Requirements the candidate says they don't meet (Setup): a job that needs one scores 4 or lower."""
+    return _as_list(_preference("cannot_do", "APPLYPILOT_CANNOT_DO"), r"[;\n]")
+
+
+def target_companies() -> list[str]:
+    """Companies the candidate especially wants (Setup): any suitable opening there is kept and ranked up."""
+    return _as_list(_preference("target_companies", "APPLYPILOT_TARGET_COMPANIES"), r"[;,\n]")
+
+
+def focus_notes() -> str:
+    """The candidate's own description of what to rank highest and what to mark down (Setup)."""
+    return str(_preference("focus", "APPLYPILOT_FOCUS") or "").strip()[:8000]
 
 
 def min_salary() -> int:

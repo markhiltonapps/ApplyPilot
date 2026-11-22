@@ -45,7 +45,7 @@ HEADERS = {
 }
 STATE_PATH = APP_DIR / "feeds_state.json"
 STRATEGY = "feed"
-MATCH_VERSION = 2  # raise when title or place matching changes, so the boards are read again straight away
+MATCH_VERSION = 3  # raise when title or place matching changes, so the boards are read again straight away
 
 
 def _env_int(name: str, default: int) -> int:
@@ -82,7 +82,14 @@ def _title_words(text: str) -> set[str]:
 _LEVEL = {"senior", "junior", "principal", "staff", "founding", "associate", "i", "ii", "iii", "iv"}
 # Words nearly every title has one of: two titles sharing only these are not the same kind of job.
 _ROLE = {"manager", "lead", "engineer", "architect", "consultant", "strategist", "advisor", "director", "head",
-         "specialist", "analyst", "vp", "officer", "executive", "leader"}
+         "specialist", "analyst", "vp", "officer", "executive", "leader", "designer", "developer", "builder"}
+
+
+def company_key(name: str | None) -> str:
+    """A company name reduced for comparing: "Retell AI", "retell.ai" and "Retell" are the same company."""
+    key = re.sub(r"[^a-z0-9]", "", (name or "").lower())
+    key = re.sub(r"(inc|llc|ltd|corp|corporation|technologies|labs)$", "", key)
+    return key[:-2] if key.endswith("ai") and len(key) > 4 else key
 
 
 def title_matcher(queries: list[str]):
@@ -241,8 +248,9 @@ class _Filter:
     """What the person is searching for, read once from searches.yaml."""
 
     def __init__(self, cfg: dict):
-        from applypilot.scoring.scorer import skip_terms, title_skip_term
+        from applypilot.scoring.scorer import skip_terms, target_companies, title_skip_term
 
+        self.targets = sorted({company_key(c) for c in target_companies()} - {""})
         self.queries = [q["query"] for q in cfg.get("queries", []) if q.get("query")]
         self.match = title_matcher(self.queries)
         self._skip_terms = skip_terms()
@@ -259,8 +267,12 @@ class _Filter:
     def skipped(self, title: str | None) -> bool:
         return bool(self._title_skip_term(title or "", self._skip_terms))
 
-    def wanted(self, title: str | None) -> bool:
-        return bool(title) and not self.skipped(title) and self.match(title)
+    def wanted(self, title: str | None, company: str | None = None) -> bool:
+        """A title that fits a searched job type, or any title at a company the person especially wants
+        (the quick title check and scoring then decide whether it suits them)."""
+        if not title or self.skipped(title):
+            return False
+        return self.match(title) or (bool(self.targets) and company_key(company) in self.targets)
 
     def fresh(self, posted: datetime | None) -> bool:
         return posted is None or posted >= self.cutoff
@@ -401,7 +413,8 @@ def search_remote_boards(conn: sqlite3.Connection, f: _Filter) -> dict:
                 continue
             keep = []
             for j in listed:
-                if not (f.wanted(j.get("title")) and f.fresh(j.get("posted")) and region_ok(j.get("region"), f.country)):
+                if not (f.wanted(j.get("title"), j.get("company")) and f.fresh(j.get("posted"))
+                        and region_ok(j.get("region"), f.country)):
                     continue
                 region = (j.get("region") or "").strip()
                 j["location"] = f"{region} (Remote)" if region else "Remote"
@@ -434,7 +447,7 @@ def _greenhouse(client: httpx.Client, slug: str, name: str, f: _Filter, conn: sq
         kind = " ".join(str(m.get("value") or "") for m in (j.get("metadata") or [])
                         if "location" in str(m.get("name") or "").lower() or "remote" in str(m.get("name") or "").lower())
         remote = bool(re.search(r"remote", kind, re.I))
-        if not (url and f.wanted(j.get("title")) and f.place_ok(location, remote)
+        if not (url and f.wanted(j.get("title"), name) and f.place_ok(location, remote)
                 and f.fresh(_when(j.get("first_published") or j.get("updated_at")))) or _known(conn, url):
             continue
         try:  # the list carries no description: fetch it for the few jobs that are kept
@@ -462,7 +475,7 @@ def _ashby(client: httpx.Client, slug: str, name: str, f: _Filter, conn: sqlite3
         kind = str(j.get("workplaceType") or "").lower()
         remote = kind == "remote" or (not kind and bool(j.get("isRemote")))
         where = location if not country or country.lower() in location.lower() else f"{location}, {country}"
-        if not (url and f.wanted(j.get("title")) and f.place_ok(where, remote) and f.fresh(_when(j.get("publishedAt")))):
+        if not (url and f.wanted(j.get("title"), name) and f.place_ok(where, remote) and f.fresh(_when(j.get("publishedAt")))):
             continue
         pay = ((j.get("compensation") or {}).get("scrapeableCompensationSalarySummary")
                or (j.get("compensation") or {}).get("compensationTierSummary"))
@@ -482,7 +495,7 @@ def _lever(client: httpx.Client, slug: str, name: str, f: _Filter, conn: sqlite3
         location = "; ".join(dict.fromkeys(cats.get("allLocations") or [cats.get("location") or ""]))
         remote = str(j.get("workplaceType") or "").lower() == "remote"
         where = f"{location}, {j['country']}" if j.get("country") and j["country"] != "US" else location
-        if not (url and f.wanted(j.get("text")) and f.place_ok(where, remote) and f.fresh(_when(j.get("createdAt")))):
+        if not (url and f.wanted(j.get("text"), name) and f.place_ok(where, remote) and f.fresh(_when(j.get("createdAt")))):
             continue
         parts = [j.get("descriptionPlain") or _text(j.get("description"))]
         parts += [f"{x.get('text', '')}\n{_text(x.get('content'))}" for x in (j.get("lists") or [])]
@@ -702,7 +715,8 @@ def run_feeds_discovery(cfg: dict | None = None) -> dict:
     every = _env_int("FEEDS_EVERY_HOURS", 6)
     # Changed job types, places or skip words: read everything again rather than wait.
     search_key = hashlib.sha256(json.dumps(
-        [MATCH_VERSION, f.queries, f.locations, f.accept, f.hours_old, f.country, f._skip_terms], sort_keys=True, default=str,
+        [MATCH_VERSION, f.queries, f.locations, f.accept, f.hours_old, f.country, f._skip_terms, f.targets],
+        sort_keys=True, default=str,
     ).encode()).hexdigest()[:16]
     if state.get("search_key") != search_key:
         state = {"search_key": search_key, "linkedin_passed_over": state.get("linkedin_passed_over", [])}

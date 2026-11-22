@@ -461,17 +461,52 @@ def save(data_dir: Path, fields: dict[str, str], files: dict[str, tuple[str, byt
     return []
 
 
-def _cannot_do(data_dir: Path, f: dict[str, str]) -> dict:
-    """The "requirements you don't meet" list to store. A form sent from a page loaded before the box
-    existed has no such field: keep what was saved rather than wiping it (and store nothing if nothing was,
-    so a list seeded by the host still applies)."""
-    if "cannot_do" in f:
-        return {"cannot_do": [x.strip() for x in f["cannot_do"].splitlines() if x.strip()]}  # commas stay
+# Scoring preferences added after the first version of the form, the environment variable the host can seed
+# each with, and how the box's text is stored.
+SEEDED = {
+    "cannot_do": ("APPLYPILOT_CANNOT_DO", lambda text: [x.strip() for x in text.splitlines() if x.strip()]),
+    "target_companies": ("APPLYPILOT_TARGET_COMPANIES", lambda text: _lines(text)),
+    "focus": ("APPLYPILOT_FOCUS", lambda text: text.strip()),
+}
+
+
+def _kept_preferences(data_dir: Path, f: dict[str, str]) -> dict:
+    """The scoring preferences in SEEDED to store. A form sent from a page loaded before a box existed has
+    no such field: keep what was saved rather than wiping it (and store nothing if nothing was, so a value
+    seeded by the host still applies)."""
     try:
         old = json.loads((data_dir / "profile.json").read_text(encoding="utf-8")).get("preferences", {})
     except (OSError, ValueError):
         old = {}
-    return {"cannot_do": old["cannot_do"]} if isinstance(old.get("cannot_do"), list) else {}
+    out = {}
+    for name, (_env, parse) in SEEDED.items():
+        if name in f:
+            out[name] = parse(f[name])
+        elif old.get(name) is not None:
+            out[name] = old[name]
+    return out
+
+
+def add_titles(data_dir: Path, titles: list[str]) -> list[str]:
+    """Add job titles to the saved form's list (skipping ones already there) and rebuild the config.
+
+    Returns the titles added. Nothing happens before Setup has been filled in.
+    """
+    form = _saved_form(data_dir)
+    if not form.get("titles"):
+        return []
+    have = {t.lower() for t in _lines(form["titles"])}
+    added = []
+    for title in titles:
+        title = " ".join(title.replace(",", " ").split())  # a comma would split one title into two
+        if title and title.lower() not in have:
+            have.add(title.lower())
+            added.append(title)
+    if added:
+        form["titles"] = form["titles"].rstrip() + "\n" + "\n".join(added)
+        (data_dir / "setup_form.json").write_text(json.dumps(form, indent=2), encoding="utf-8")
+        rebuild_from_saved(data_dir)
+    return added
 
 
 def saved_find_only(data_dir: Path) -> bool:
@@ -580,7 +615,7 @@ def write_config(data_dir: Path, f: dict[str, str]) -> None:
             "preserved_school": f.get("school", ""),
             "real_metrics": _lines(f.get("metrics", "")),
         },
-        "preferences": {"ai_only": bool(f.get("ai_only")), **_cannot_do(data_dir, f)},
+        "preferences": {"ai_only": bool(f.get("ai_only")), **_kept_preferences(data_dir, f)},
         "application_answers": application_answers(f),
         "eeo_voluntary": {
             "gender": f.get("eeo_gender") or DECLINE,
@@ -651,9 +686,11 @@ def render(data_dir: Path, environ: dict, values: dict[str, str] | None = None,
     v = {**_saved_form(data_dir), **(values or {})}
     fresh = not v
     v.setdefault("skip_titles", "\n".join(EXCLUDE_TITLES))  # forms saved before this box existed
-    # Not saved yet: show what the host seeded, which scoring uses until this box is saved.
-    v.setdefault("cannot_do", "\n".join(
-        x.strip() for x in re.split(r"[;\n]", environ.get("APPLYPILOT_CANNOT_DO", "")) if x.strip()))
+    # Boxes not saved yet show what the host seeded, which scoring uses until the box is saved.
+    for name, (env, parse) in SEEDED.items():
+        seed = environ.get(env, "")
+        parsed = parse(seed if name == "focus" else seed.replace(";", "\n"))  # seeded lists may use ";"
+        v.setdefault(name, "\n".join(parsed) if isinstance(parsed, list) else parsed)
 
     def val(name: str, default: str = "") -> str:
         return html.escape(v.get(name, default), quote=True)
@@ -804,6 +841,12 @@ site&rsquo;s rules.</p>{pw_clear}
 {check("want_remote", "Remote jobs", True)}
 {check("want_local", "Jobs near my city", True)}
 {check("ai_only", "Only AI-focused roles (jobs where AI is a real part of the work, not just a mention)", False)}
+{area("focus", "Search focus and priorities",
+       "Optional, in your own words: the kind of work to rank highest, signals to look for, and what to mark "
+       "down or leave out. The AI reads this for every job it scores, and when it writes a resume.")}
+{area("target_companies", "Companies you especially want",
+       "Optional, one per line. A suitable job there ranks a little higher, and every opening they post on a job "
+       "board we can read is checked, even when its title isn&rsquo;t on your list.")}
 {area("cannot_do", "Requirements you don&rsquo;t meet",
        "One per line, in your own words, e.g. &ldquo;Writing code in a programming language such as Python or "
        "JavaScript&rdquo; or &ldquo;Security clearance&rdquo;. A job that requires one scores 4 or lower, so it "

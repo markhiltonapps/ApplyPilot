@@ -5,6 +5,20 @@
 # Add a company by adding a line under the system it uses.
 
 greenhouse:
+  # Voice AI, AI receptionist and small-business software companies
+  numa: "Numa"
+  nice: "NICE"
+  podium81: "Podium"
+  zenoti: "Zenoti"
+  tebra: "Tebra"
+  nexhealth: "NexHealth"
+  callrail: "CallRail"
+  lawmatics: "Lawmatics"
+  boulevard: "Boulevard"
+  cloudbeds: "Cloudbeds"
+  opentable: "OpenTable"
+  lumahealth: "Luma Health"
+  dentalxchange: "DentalXChange"
   "6sense": "6sense"
   abnormalsecurity: "Abnormal"
   adyen: "Adyen"
@@ -141,6 +155,22 @@ greenhouse:
   zoominfo: "ZoomInfo Technologies LLC"
 
 ashby:
+  # Voice AI, AI receptionist and small-business software companies
+  retell-ai: "Retell AI"
+  weave: "Weave"
+  jobber: "Jobber"
+  mindbody: "Mindbody"
+  quo: "Quo (OpenPhone)"
+  avoca: "Avoca AI"
+  netic: "Netic"
+  broccoli: "Broccoli AI"
+  gigaml: "Giga"
+  lorikeet: "Lorikeet"
+  wonderful: "Wonderful"
+  owner: "Owner.com"
+  overjet: "Overjet"
+  pearl: "Pearl"
+  mangomint: "Mangomint"
   "1password": "1Password"
   abridge: "Abridge"
   airbyte: "Airbyte"
@@ -256,6 +286,9 @@ ashby:
   zip: "Zip"
 
 lever:
+  # Voice AI, AI receptionist and small-business software companies
+  slangai: "Slang.ai"
+  olo: "Olo"
   anchorage: "Anchorage Digital"
   immuta: "Immuta"
   levelai: "Level AI"

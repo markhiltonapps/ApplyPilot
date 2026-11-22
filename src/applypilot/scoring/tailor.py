@@ -68,6 +68,14 @@ def _build_tailor_prompt(profile: dict) -> str:
     education = profile.get("experience", {})
     education_level = education.get("education_level", "")
 
+    # The person's own notes (Setup: search focus and priorities) may say what to lead with for which roles.
+    from applypilot.scoring.scorer import focus_notes
+    notes = focus_notes()
+    notes_block = (
+        "## THE CANDIDATE'S OWN NOTES\nFollow what these say about what to lead with and how to present their "
+        "background. They never override the hard rules below, and they are not a source of facts or numbers: "
+        "those come only from the base resume.\n-----\n" + notes + "\n-----\n\n") if notes else ""
+
     return f"""You are a senior technical recruiter rewriting a resume to get this person an interview.
 
 Take the base resume and job description. Return a tailored resume as a JSON object.
@@ -112,7 +120,7 @@ Cutting a weaker bullet is better than shortening a strong one until it says not
   {banned_str}
 - No em dashes. Use commas, periods, or hyphens.
 
-## HARD RULES:
+{notes_block}## HARD RULES:
 - Do NOT invent work, companies, degrees, or certifications
 - TECHNICAL SKILLS may only list skills from the allowed list above; never add tools (like Office apps) that aren't there
 - Keep how the base resume qualifies a skill. If it says AI-assisted, familiar with, exposure to, or similar, keep

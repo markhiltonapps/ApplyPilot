@@ -88,6 +88,28 @@ def now_iso() -> str:
 # Config seeding
 # ---------------------------------------------------------------------------
 
+def add_requested_titles() -> None:
+    """Add the job titles in APPLYPILOT_ADD_TITLES (one per line or separated by ";") to the Setup list, once
+    for each distinct value of the variable. They then show in Setup, where they can be edited or removed."""
+    import hashlib
+    raw = os.environ.get("APPLYPILOT_ADD_TITLES", "").strip()
+    if not raw:
+        return
+    marker = DATA_DIR / ".added_titles"
+    key = hashlib.sha256(raw.encode()).hexdigest()[:16]
+    if marker.exists() and marker.read_text().strip() == key:
+        return
+    if not (DATA_DIR / "setup_form.json").exists():
+        return  # Setup not filled in yet: try again next start
+    try:
+        added = setup_form.add_titles(DATA_DIR, [t for t in re.split(r"[;\n]", raw) if t.strip()])
+    except Exception as e:  # noqa: BLE001 - never stop the site from starting over this
+        log(f"Could not add the requested job titles: {e}")
+        return
+    marker.write_text(key)
+    log(f"Added {len(added)} job title(s) to Setup")
+
+
 def seed_config() -> list[str]:
     """Write profile/resume/searches from env vars into the data dir.
 
@@ -96,6 +118,7 @@ def seed_config() -> list[str]:
     DATA_DIR.mkdir(parents=True, exist_ok=True)
     problems: list[str] = []
     setup_form.rebuild_from_saved(DATA_DIR)
+    add_requested_titles()
 
     profile = os.environ.get("APPLYPILOT_PROFILE_JSON", "").strip()
     if profile:
@@ -252,11 +275,15 @@ def requeue_failed_scores() -> None:
         # ...or the resume changed since then: every score is relative to the resume.
         import hashlib
 
-        from applypilot.scoring.scorer import SCORE_PROMPT_VERSION, ai_only
+        from applypilot.scoring.scorer import SCORE_PROMPT_VERSION, ai_only, focus_notes, target_companies
         resume = DATA_DIR / "resume.txt"
         resume_hash = hashlib.sha256(resume.read_bytes()).hexdigest()[:16] if resume.exists() else ""
         base = f"{SCORE_PROMPT_VERSION}:{resume_hash}"
         version = base + (":ai" if ai_only() else "")
+        # The person's own priorities and target companies move scores up as well as down.
+        steer = focus_notes() + "|" + "|".join(sorted(target_companies()))
+        if steer != "|":
+            version += ":f" + hashlib.sha256(steer.encode()).hexdigest()[:12]
         marker = DATA_DIR / ".score_prompt_version"
         old_version = marker.read_text().strip() if marker.exists() else ""
         # Old markers held only the prompt version; treat a matching one as current for this resume.
